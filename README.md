@@ -27,9 +27,16 @@
 
 ## 快速上手
 
-**懒人版**：双击 `合同盖章工具.exe`，完事。
+**下载即用（推荐）**：
 
-**极客版**：
+| 平台 | 下载 | 说明 |
+|---|---|---|
+| GitHub | [Releases](https://github.com/kimhero110/contract-sealer/releases) | `contract-sealer.exe` 单文件，双击即用 |
+| Gitee（国内更快） | [发行版](https://gitee.com/xu512/contract-sealer/releases) | `contract-sealer-win.7z`，用 7-Zip 解压后运行（Gitee 附件限 100MB，所以压缩了一下） |
+
+都是 Windows 版，不需要装 Python。
+
+**源码运行**：
 
 ```bat
 python -m venv .venv

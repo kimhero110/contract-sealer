@@ -42,6 +42,11 @@ jobs:
         run: pyinstaller --noconfirm --onefile --windowed --name "合同盖章工具" run_app.py
       - name: 生成 ASCII 文件名副本（Release 附件用，避免 CI 工具链中文名乱码）
         run: Copy-Item "dist/合同盖章工具.exe" "dist/contract-sealer.exe"
+      - name: Gitee 兼容包（onedir + 7z 压到 100MB 以内）
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "contract-sealer" run_app.py
+          7z a -mx=9 -m0=lzma2 "dist/contract-sealer-win.7z" "dist/contract-sealer/"
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -49,6 +54,7 @@ jobs:
           path: |
             dist/合同盖章工具.exe
             dist/contract-sealer.exe
+            dist/contract-sealer-win.7z
           retention-days: 30
       - name: 发布 Release（仅 v* 标签）
         if: startsWith(github.ref, 'refs/tags/v')
@@ -56,3 +62,44 @@ jobs:
         with:
           files: dist/contract-sealer.exe
           generate_release_notes: true
+
+  gitee-release:
+    name: 同步发行版到 Gitee（国内用户直接下载）
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    env:
+      GITEE_USER: xu512
+      GITEE_REPO: contract-sealer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: contract-sealer-windows-exe
+          path: dist
+      - name: 推送标签到 Gitee
+        run: |
+          $tag = "${{ github.ref_name }}"
+          git push "https://${{ env.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}.git" "${tag}" 2>&1 | Out-Host
+      - name: 创建/复用 Gitee 发行版并上传附件
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $token = "${{ secrets.GITEE_TOKEN }}"
+          $base = "https://gitee.com/api/v5/repos/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}"
+          # 幂等：已有发行版则复用
+          try {
+            $rel = Invoke-RestMethod -Uri "$base/releases/tags/$tag`?access_token=$token"
+          } catch {
+            $body = @{ access_token = $token; tag_name = $tag; target_commitish = "main";
+                       name = "$tag"; body = "下载 contract-sealer-win.7z，用 7-Zip 解压后运行 contract-sealer.exe（Windows，无需安装 Python）。" } | ConvertTo-Json
+            $rel = Invoke-RestMethod -Method Post -Uri "$base/releases" -ContentType "application/json" -Body $body
+          }
+          # 清掉同名旧附件
+          foreach ($f in @($rel.attach_files)) {
+            if ($f.name -eq "contract-sealer-win.7z") {
+              Invoke-RestMethod -Method Delete -Uri "$base/releases/$($rel.id)/attach_files/$($f.id)`?access_token=$token" | Out-Null
+            }
+          }
+          curl.exe -s -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 600 | Out-Host
