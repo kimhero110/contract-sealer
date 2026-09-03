@@ -21,8 +21,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: 安装依赖
-        run: pip install PyMuPDF opencv-python-headless Pillow numpy pytest
+        run: pip install PyMuPDF opencv-python-headless Pillow numpy PySide6 pytest
       - name: 运行测试
+        env:
+          QT_QPA_PLATFORM: offscreen  # GUI 测试无显示环境
         run: pytest tests -q
 
   build:
