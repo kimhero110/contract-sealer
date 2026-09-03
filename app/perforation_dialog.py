@@ -268,15 +268,28 @@ class EffectPreviewDialog(QDialog):
         self.resize(1000, 560)
 
     def _render_effect(self, page: Page, pl: SlicePlacement, thumb_w: int = 300) -> np.ndarray:
-        """把单个切片按真实坐标合成到缩放后的页面上。"""
+        """把单个切片按真实坐标合成到缩放后的页面上。
+
+        关键：切片必须与页面缩放到同一 DPI——apply_perforation 按像素合成，
+        全分辨率切片直接画到缩略图上会大出好几倍（"章比页面大" bug）。
+        """
         h, w = page.image.shape[:2]
         thumb_h = round(h * thumb_w / w)
         thumb_img = cv2.resize(page.image, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
         thumb_page = Page(image=thumb_img, phys_w_mm=page.phys_w_mm, phys_h_mm=page.phys_h_mm)
+        # 切片同步缩放到缩略图 DPI
+        scale = thumb_page.dpi / page.dpi
+        sl = pl.slice_rgba
+        if abs(scale - 1.0) > 1e-6:
+            sl = cv2.resize(
+                sl,
+                (max(1, round(sl.shape[1] * scale)), max(1, round(sl.shape[0] * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
         out = apply_perforation([thumb_page], [
             SlicePlacement(
                 page_index=0,
-                slice_rgba=pl.slice_rgba,
+                slice_rgba=sl,
                 right_edge_mm=pl.right_edge_mm,
                 top_mm=pl.top_mm,
                 y_offset_mm=0.0,

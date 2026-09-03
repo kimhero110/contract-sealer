@@ -68,10 +68,9 @@ class StampItem(QGraphicsPixmapItem):
         # 中心点十字准星：让操作者看清落章中心（修改意见 #2/#3）
         r = self.boundingRect()
         cx, cy = r.center().x(), r.center().y()
-        arm = min(r.width(), r.height()) * 0.08 / max(self.scale(), 1e-6)
-        pen = QPen(Qt.red)
-        pen.setWidthF(0.3 / max(self.scale(), 1e-6))  # 视觉细线，随缩放自适应
-        pen.setCosmetic(True)
+        arm = min(r.width(), r.height()) * 0.15  # 局部坐标，随章大小自适应
+        pen = QPen(Qt.red, 0)  # 0 = 1px 细线
+        pen.setCosmetic(True)  # 线宽不随视图缩放变化
         painter.setPen(pen)
         painter.drawLine(cx - arm, cy, cx + arm, cy)
         painter.drawLine(cx, cy - arm, cx, cy + arm)

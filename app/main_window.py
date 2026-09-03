@@ -287,7 +287,10 @@ class MainWindow(QMainWindow):
             seal.image, self.panel.random_spec()
         )
         self.stamps.setdefault(self.current_page, []).append(rec)
-        self.canvas.add_stamp(self._make_stamp_item(rec))
+        item = self._make_stamp_item(rec)
+        self.canvas.add_stamp(item)
+        # 视图跳转到新章位置，落章即所见（修复"盖完找不到章"）
+        self.canvas.centerOn(item)
         self._update_info(rec)
 
     def _add_perforation(self, seal: Seal) -> None:
@@ -327,6 +330,9 @@ class MainWindow(QMainWindow):
             )
             self.stamps.setdefault(pl.page_index, []).append(rec)
             touched_pages.add(pl.page_index)
+        # 当前页不在骑缝范围内时，跳到第一个受影响的页，否则用户看不到任何变化
+        if self.current_page not in touched_pages:
+            self.page_list.setCurrentRow(min(touched_pages))
         # 刷新当前页显示
         self._on_page_changed(self.current_page)
         QMessageBox.information(
