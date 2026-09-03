@@ -40,15 +40,19 @@ jobs:
         run: pip install PyMuPDF opencv-python-headless Pillow numpy PySide6 pyinstaller
       - name: PyInstaller 打包
         run: pyinstaller --noconfirm --onefile --windowed --name "合同盖章工具" run_app.py
+      - name: 生成 ASCII 文件名副本（Release 附件用，避免 CI 工具链中文名乱码）
+        run: Copy-Item "dist/合同盖章工具.exe" "dist/contract-sealer.exe"
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: contract-sealer-windows-exe
-          path: dist/合同盖章工具.exe
+          path: |
+            dist/合同盖章工具.exe
+            dist/contract-sealer.exe
           retention-days: 30
       - name: 发布 Release（仅 v* 标签）
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/合同盖章工具.exe
+          files: dist/contract-sealer.exe
           generate_release_notes: true
