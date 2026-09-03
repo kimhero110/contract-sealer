@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QKeyEvent, QPixmap, QWheelEvent
+from PySide6.QtGui import QImage, QKeyEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
 
@@ -62,6 +62,19 @@ class StampItem(QGraphicsPixmapItem):
         r = self.boundingRect()
         self.setPos(x_mm - r.width() * self.scale() / 2,
                     y_mm - r.height() * self.scale() / 2)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:
+        super().paint(painter, option, widget)
+        # 中心点十字准星：让操作者看清落章中心（修改意见 #2/#3）
+        r = self.boundingRect()
+        cx, cy = r.center().x(), r.center().y()
+        arm = min(r.width(), r.height()) * 0.08 / max(self.scale(), 1e-6)
+        pen = QPen(Qt.red)
+        pen.setWidthF(0.3 / max(self.scale(), 1e-6))  # 视觉细线，随缩放自适应
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.drawLine(cx - arm, cy, cx + arm, cy)
+        painter.drawLine(cx, cy - arm, cx, cy + arm)
 
 
 class PageCanvas(QGraphicsView):

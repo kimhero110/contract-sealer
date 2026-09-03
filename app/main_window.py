@@ -109,6 +109,14 @@ class MainWindow(QMainWindow):
 
         # 选中印章的微调控件
         adj = QFormLayout()
+        self.pos_x_spin = QDoubleSpinBox()
+        self.pos_x_spin.setRange(0.0, 2000.0)
+        self.pos_x_spin.setSuffix(" mm")
+        self.pos_x_spin.valueChanged.connect(self._apply_adjustments)
+        self.pos_y_spin = QDoubleSpinBox()
+        self.pos_y_spin.setRange(0.0, 2000.0)
+        self.pos_y_spin.setSuffix(" mm")
+        self.pos_y_spin.valueChanged.connect(self._apply_adjustments)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(3.0, 300.0)
         self.size_spin.setSuffix(" mm")
@@ -122,6 +130,8 @@ class MainWindow(QMainWindow):
         self.opa_spin.setSingleStep(0.05)
         self.opa_spin.setValue(1.0)
         self.opa_spin.valueChanged.connect(self._apply_adjustments)
+        adj.addRow("中心 X", self.pos_x_spin)
+        adj.addRow("中心 Y", self.pos_y_spin)
         adj.addRow("尺寸", self.size_spin)
         adj.addRow("旋转", self.rot_spin)
         adj.addRow("不透明度", self.opa_spin)
@@ -135,6 +145,18 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
+
+        # 工具栏：页面旋转 + 页序调整（修改意见 #1）
+        from PySide6.QtWidgets import QToolBar
+
+        tb = QToolBar("页面操作")
+        tb.addAction("↻ 顺转 90°", lambda: self._rotate_page(-1))
+        tb.addAction("↺ 逆转 90°", lambda: self._rotate_page(1))
+        tb.addAction("180°", lambda: self._rotate_page(2))
+        tb.addSeparator()
+        tb.addAction("↑ 页面上移", lambda: self._move_page(-1))
+        tb.addAction("↓ 页面下移", lambda: self._move_page(1))
+        self.addToolBar(tb)
 
     def _build_menu(self) -> None:
         open_act = QAction("打开合同…", self)
@@ -342,19 +364,22 @@ class MainWindow(QMainWindow):
         rec = self._find_record(item)
         if rec is None:
             return
+        rec.center_x_mm = self.pos_x_spin.value()
+        rec.center_y_mm = self.pos_y_spin.value()
         rec.size_mm = self.size_spin.value()
         rec.rotation_deg = self.rot_spin.value()
         rec.opacity = self.opa_spin.value()
-        center = item.center()
         item.size_mm = rec.size_mm
         item._update_scale()
-        item.set_center(*center)
+        item.set_center(rec.center_x_mm, rec.center_y_mm)
         item.setRotation(rec.rotation_deg)
         item.setOpacity(rec.opacity)
         self._update_info(rec)
 
     def _sync_adjust_spins(self, rec: StampRecord) -> None:
         self._syncing = True
+        self.pos_x_spin.setValue(rec.center_x_mm)
+        self.pos_y_spin.setValue(rec.center_y_mm)
         self.size_spin.setValue(rec.size_mm)
         self.rot_spin.setValue(rec.rotation_deg)
         self.opa_spin.setValue(rec.opacity)
@@ -385,6 +410,25 @@ class MainWindow(QMainWindow):
         self.stamps[self.current_page] = [
             r for r in self.stamps.get(self.current_page, []) if id(r) in alive
         ]
+
+    def _move_page(self, delta: int) -> None:
+        """页序调整：当前页上移/下移一位，盖章记录随页面走（修改意见 #1）。"""
+        if self.doc is None or self.current_page < 0:
+            return
+        old = self.current_page
+        new = old + delta
+        if new < 0 or new >= len(self.doc.pages):
+            return
+        self._sync_canvas_to_records()
+        # 交换页面与各自的盖章记录
+        self.doc.pages[old], self.doc.pages[new] = self.doc.pages[new], self.doc.pages[old]
+        self.stamps[old], self.stamps[new] = self.stamps.get(old, []), self.stamps.get(new, [])
+        self.stamps = {k: v for k, v in self.stamps.items() if v}
+        self.current_page = -1  # 强制重建画布
+        self.page_list.setCurrentRow(new)
+        # 两个位置的缩略图都要刷新
+        self._refresh_page_thumbnail(old)
+        self._refresh_page_thumbnail(new)
 
     # ── 页面操作（M3）──
 
