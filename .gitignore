@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+tests/smoke_out/
+
+# 真实敏感素材（合同扫描件、真实印章/签名）永不入库
+/*.jpg
+/*.jpeg
+/*.png
+/*.bmp
+/*.tif
+/*.tiff
+/*.exe
+/*_已盖章_*
+*.sealog

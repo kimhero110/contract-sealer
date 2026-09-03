@@ -1,0 +1,18 @@
+[project]
+name = "contract-sealer"
+version = "0.1.0"
+description = "扫描合同盖章工具：物理尺寸 1:1 盖章、骑缝章、手写签名，本地离线运行"
+requires-python = ">=3.11"
+dependencies = [
+    "PyMuPDF>=1.24",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10.0",
+    "numpy>=1.26",
+    "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
