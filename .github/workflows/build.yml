@@ -106,4 +106,4 @@ jobs:
               Invoke-RestMethod -Method Delete -Uri "$base/releases/$($rel.id)/attach_files/$($f.id)`?access_token=$token" | Out-Null
             }
           }
-          curl.exe -s -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 600 | Out-Host
+          curl.exe -sS -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 1800 --retry 3 --retry-all-errors | Out-Host
