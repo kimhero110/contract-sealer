@@ -92,18 +92,27 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $token = "${{ secrets.GITEE_TOKEN }}"
           $base = "https://gitee.com/api/v5/repos/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}"
-          # 幂等：已有发行版则复用
+          # 幂等：已有发行版则复用。注意 Gitee 该接口对不存在的发行版返回 200+null（不是 404）
+          $rel = $null
           try {
             $rel = Invoke-RestMethod -Uri "$base/releases/tags/$tag`?access_token=$token"
-          } catch {
+          } catch { $rel = $null }
+          if (-not $rel -or -not $rel.id) {
             $body = @{ access_token = $token; tag_name = $tag; target_commitish = "main";
                        name = "$tag"; body = "下载 contract-sealer-win.7z，用 7-Zip 解压后运行 contract-sealer.exe（Windows，无需安装 Python）。" } | ConvertTo-Json
             $rel = Invoke-RestMethod -Method Post -Uri "$base/releases" -ContentType "application/json" -Body $body
           }
+          if (-not $rel.id) { throw "Gitee 发行版创建失败" }
           # 清掉同名旧附件
           foreach ($f in @($rel.attach_files)) {
             if ($f.name -eq "contract-sealer-win.7z") {
               Invoke-RestMethod -Method Delete -Uri "$base/releases/$($rel.id)/attach_files/$($f.id)`?access_token=$token" | Out-Null
             }
           }
-          curl.exe -sS -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 1800 --retry 3 --retry-all-errors | Out-Host
+          # 上传（--fail 让 HTTP 错误直接失败，405 不再静默通过）
+          curl.exe -sS --fail -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 1800 --retry 3 --retry-all-errors | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "附件上传失败: curl exit $LASTEXITCODE" }
+          # 验证下载链接真实可用（Gitee 附件列表 API 会误报 0 字节，不信它，信下载）
+          $code = curl.exe -sL -o NUL -w "%{http_code}" "https://gitee.com/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}/releases/download/$tag/contract-sealer-win.7z" --max-time 120
+          if ($code -ne "200") { throw "附件下载验证失败: HTTP $code" }
+          Write-Output "Gitee 发行版同步完成并验证: HTTP $code"
