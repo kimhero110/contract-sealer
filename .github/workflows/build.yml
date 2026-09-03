@@ -82,7 +82,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $remote = "https://${{ env.GITEE_USER }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}.git"
           git push --force $remote "refs/tags/${tag}:refs/tags/${tag}" 2>&1 | Out-Host
-          git push $remote "main:main" 2>&1 | Out-Host
+          git push $remote "HEAD:refs/heads/main" 2>&1 | Out-Host
       - name: 创建/复用 Gitee 发行版并上传附件
         shell: pwsh
         run: |
