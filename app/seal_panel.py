@@ -41,6 +41,7 @@ class SealPanel(QWidget):
 
     stamp_requested = Signal(object)   # Seal
     perforation_requested = Signal(object)  # Seal（骑缝章）
+    reroll_requested = Signal()        # 换一批手感
     export_requested = Signal()
     random_changed = Signal(object)    # RandomSpec
 
@@ -92,6 +93,11 @@ class SealPanel(QWidget):
         for s in (self.slider_angle, self.slider_tone, self.slider_dust):
             s.valueChanged.connect(self._emit_random)
         layout.addWidget(rnd_group)
+
+        self.btn_reroll = QPushButton("🎲 换一批手感")
+        self.btn_reroll.setToolTip("重摇所有章/签名的随机效果（骑缝切片不受影响）")
+        self.btn_reroll.clicked.connect(self.reroll_requested)
+        layout.addWidget(self.btn_reroll)
 
         # ── 选中印章信息 ──
         self.info_label = QLabel("未选中印章")

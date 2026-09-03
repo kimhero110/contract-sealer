@@ -95,7 +95,9 @@ class MainWindow(QMainWindow):
 
         self.canvas = PageCanvas()
         self.canvas.stamp_moved.connect(self._on_stamp_moved)
+        self.canvas.stamps_deleted.connect(self._on_stamps_deleted)
         self.canvas.stamp_placed.connect(self._on_stamp_placed)
+        self.canvas.place_rejected.connect(self._on_place_rejected)
         self.canvas.follow_cancelled.connect(self._on_follow_cancelled)
         self.canvas.canvas_clicked.connect(self._on_canvas_clicked)
         self.canvas.points_picked.connect(self._on_points_picked)
@@ -110,6 +112,7 @@ class MainWindow(QMainWindow):
         self.panel = SealPanel()
         self.panel.stamp_requested.connect(self._add_stamp)
         self.panel.perforation_requested.connect(self._add_perforation)
+        self.panel.reroll_requested.connect(self._reroll_random)
         self.panel.export_requested.connect(self._export)
         v.addWidget(self.panel)
 
@@ -308,11 +311,8 @@ class MainWindow(QMainWindow):
         self._pending_rec = None
         self.info_label.setText("已取消盖章")
 
-    def _on_canvas_clicked(self, x_mm: float, y_mm: float) -> None:
-        """空白处单击：把选中的章移过去（修改意见：鼠标直接点中心点）。"""
-        item = self.canvas.selected_stamp()
-        if item is None:
-            return
+    def _on_canvas_clicked(self, item, x_mm: float, y_mm: float) -> None:
+        """空白处单击：把候选章移过去（press 时记录的章，不依赖 release 时的选中态）。"""
         rec = self._find_record(item)
         if rec is None:
             return
@@ -321,6 +321,9 @@ class MainWindow(QMainWindow):
         item.set_center(x_mm, y_mm)
         self._update_info(rec)
         self._sync_adjust_spins(rec)
+
+    def _on_place_rejected(self) -> None:
+        self.info_label.setText("请点击页面范围内落章（章整个飞出纸面会被忽略）")
 
     def _add_perforation(self, seal: Seal) -> None:
         """骑缝章：对话框 → 拼合预览确认 → 切片作为 locked 记录落到各页。"""
@@ -360,10 +363,20 @@ class MainWindow(QMainWindow):
             self.stamps.setdefault(pl.page_index, []).append(rec)
             touched_pages.add(pl.page_index)
         # 当前页不在骑缝范围内时，跳到第一个受影响的页，否则用户看不到任何变化
-        if self.current_page not in touched_pages:
-            self.page_list.setCurrentRow(min(touched_pages))
+        target_page = self.current_page if self.current_page in touched_pages else min(touched_pages)
+        self.page_list.setCurrentRow(target_page)
         # 刷新当前页显示
         self._on_page_changed(self.current_page)
+        # 定位到第一个切片并放大，让细条带直接可见（骑缝可见性）
+        first_page = min(touched_pages)
+        if first_page == self.current_page:
+            for item in self.canvas.stamps():
+                rec = self._find_record(item)
+                if rec is not None and rec.locked:
+                    self.canvas.centerOn(item)
+                    self.canvas.scale(2.0, 2.0)
+                    item.setSelected(True)
+                    break
         QMessageBox.information(
             self, "骑缝章已应用", f"已在 {len(touched_pages)} 页放置切片（组 {group}）。"
         )
@@ -429,7 +442,13 @@ class MainWindow(QMainWindow):
         )
 
     def _sync_canvas_to_records(self) -> None:
-        """翻页/导出前：把画布上的印章状态写回记录。"""
+        """翻页/导出前：把画布上的印章位置写回记录。
+
+        注意：本函数只做位置同步，绝不删除记录——删除记录的唯一入口是
+        用户在画布上按 Delete（stamps_deleted 显式信号）。
+        （教训：曾经的差集剪除把"还没渲染上画布的新记录"误删，导致
+        骑缝章/模板在当前页丢失。）
+        """
         if self.current_page < 0:
             return
         for item in self.canvas.stamps():
@@ -437,10 +456,12 @@ class MainWindow(QMainWindow):
             if rec is None:
                 continue
             rec.center_x_mm, rec.center_y_mm = item.center()
-        # 删除在画布上已不存在的记录（用户在画布上按了 Delete）
-        alive = {item.data(0) for item in self.canvas.stamps()}
+
+    def _on_stamps_deleted(self, items: list) -> None:
+        """显式删除：只处理用户在画布上按 Delete 移除的章。"""
+        doomed = {it.data(0) for it in items}
         self.stamps[self.current_page] = [
-            r for r in self.stamps.get(self.current_page, []) if id(r) in alive
+            r for r in self.stamps.get(self.current_page, []) if id(r) not in doomed
         ]
 
     def _move_page(self, delta: int) -> None:
@@ -583,6 +604,28 @@ class MainWindow(QMainWindow):
 
     # ── 模板（M3）──
 
+    def _reroll_random(self) -> None:
+        """「换一批手感」：重摇所有普通章/签名的随机效果（骑缝切片除外）。
+
+        骑缝切片是一整枚章切出来的，参数未保留，无法重摇——
+        需要换手感请重新打开骑缝章对话框。
+        """
+        count = 0
+        rng = Randomizer(secrets.randbelow(2**31 - 1))
+        spec = self.panel.random_spec()
+        for page_idx, records in self.stamps.items():
+            for rec in records:
+                if rec.locked:
+                    continue
+                rec.processed, rec.applied = rng.apply_auto(rec.seal.image, spec)
+                count += 1
+        # 刷新当前页画布上的贴图
+        for item in self.canvas.stamps():
+            rec = self._find_record(item)
+            if rec is not None and not rec.locked and rec.processed is not None:
+                item.set_pixmap_rgba(rec.processed)
+        self.info_label.setText(f"已为 {count} 枚章/签名更换手感（骑缝切片不受影响）")
+
     def _save_template(self) -> None:
         if self.doc is None or self.current_page < 0:
             return
@@ -711,16 +754,16 @@ class MainWindow(QMainWindow):
     # ── 导出 ──
 
     def _export_document(self) -> Path:
-        """把当前 doc + stamps 导出为 PDF（批量与单次导出共用）。返回输出路径。"""
-        # 每次导出一个新种子；重采样未锁定印章的随机效果（方案 §4.9）
-        seed = secrets.randbelow(2**31 - 1)
-        rng = Randomizer(seed)
+        """把当前 doc + stamps 导出为 PDF（批量与单次导出共用）。返回输出路径。
+
+        所见即所得：所有章直接使用落章时已采样的 processed 图像，
+        导出不做任何重采样（v0.2.1 起废除"每次导出新种子"——画布显示
+        什么就导出什么；想换手感用「换一批手感」按钮主动重摇）。
+        """
         spec = self.panel.random_spec()
         stamp_logs = []
         for page_idx, records in self.stamps.items():
             for rec in records:
-                if not rec.locked:
-                    rec.processed, rec.applied = rng.apply_auto(rec.seal.image, spec)
                 stamp_logs.append(
                     {
                         "page": page_idx + 1,
@@ -756,7 +799,9 @@ class MainWindow(QMainWindow):
         out_dir = Path(self.doc.source_path).parent if self.doc.source_path else Path.cwd()
         out_path = make_output_path(self.doc.source_path, out_dir)
         sealog = {
-            "seed": seed,
+            # 注意：顶层 seed 仅供参考；复现的权威数据是每枚章的 random.applied 值
+            "seed": self._session_rng.seed,
+            "seed_note": "per-stamp random.applied values are authoritative for replay",
             "random_spec": {
                 "angle_deg": spec.angle_deg,
                 "tone": spec.tone,
