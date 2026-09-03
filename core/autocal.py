@@ -46,12 +46,29 @@ def auto_calibrate_page(page: Page) -> bool:
     quad = detect_paper_quad(page.image)
     if quad is None:
         return False
+    return warp_to_a4(page, quad) is not None
+
+
+def warp_to_a4(page: Page, quad: np.ndarray, min_area_ratio: float = 0.1) -> np.ndarray | None:
+    """按给定四边形顶点透视校正页面为标准 A4（四点纸边校准的核心，修改意见）。
+
+    quad：4x2 像素坐标（任意顺序，内部自动排序为左上/右上/右下/左下）。
+    变换后页面图像被拉伸裁正为 A4 比例，物理尺寸设为 210×297mm。
+    返回 3x3 变换矩阵 H（旧页像素 → 新页像素，用于映射已盖章坐标）；失败返回 None。
+    """
+    ordered = _order_quad(np.asarray(quad, dtype=np.float32))
+
+    # 防御：四点围成的面积太小（共线/挤在一起）时拒绝，避免产出垃圾
+    area = cv2.contourArea(ordered)
+    img_area = page.image.shape[0] * page.image.shape[1]
+    if area < img_area * min_area_ratio:
+        return None
 
     # 目标尺寸：保持原图约等分辨率，A4 比例
-    w_top = np.linalg.norm(quad[1] - quad[0])
-    w_bot = np.linalg.norm(quad[2] - quad[3])
-    h_left = np.linalg.norm(quad[3] - quad[0])
-    h_right = np.linalg.norm(quad[2] - quad[1])
+    w_top = np.linalg.norm(ordered[1] - ordered[0])
+    w_bot = np.linalg.norm(ordered[2] - ordered[3])
+    h_left = np.linalg.norm(ordered[3] - ordered[0])
+    h_right = np.linalg.norm(ordered[2] - ordered[1])
     out_w = int(max(w_top, w_bot))
     out_h = int(max(h_left, h_right))
     landscape = out_w > out_h
@@ -64,7 +81,7 @@ def auto_calibrate_page(page: Page) -> bool:
         [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
         dtype=np.float32,
     )
-    m = cv2.getPerspectiveTransform(quad, dst)
+    m = cv2.getPerspectiveTransform(ordered, dst)
     warped = cv2.warpPerspective(page.image, m, (out_w, out_h))
 
     page.image = warped
@@ -73,7 +90,13 @@ def auto_calibrate_page(page: Page) -> bool:
     else:
         page.phys_w_mm, page.phys_h_mm = A4_W_MM, A4_H_MM
     page.needs_calibration = False
-    return True
+    return m
+
+
+def map_points_through(homography: np.ndarray, pts_px: np.ndarray) -> np.ndarray:
+    """把像素点经透视矩阵 H 映射到新坐标（用于校准后已盖章位置跟随）。"""
+    pts = np.asarray(pts_px, dtype=np.float32).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(pts, homography).reshape(-1, 2)
 
 
 def _order_quad(pts: np.ndarray) -> np.ndarray:

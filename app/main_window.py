@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDialog,
@@ -94,6 +95,11 @@ class MainWindow(QMainWindow):
 
         self.canvas = PageCanvas()
         self.canvas.stamp_moved.connect(self._on_stamp_moved)
+        self.canvas.stamp_placed.connect(self._on_stamp_placed)
+        self.canvas.follow_cancelled.connect(self._on_follow_cancelled)
+        self.canvas.canvas_clicked.connect(self._on_canvas_clicked)
+        self.canvas.points_picked.connect(self._on_points_picked)
+        self.canvas.pick_cancelled.connect(self._on_pick_cancelled)
         splitter.addWidget(self.canvas)
 
         right = QWidget()
@@ -107,16 +113,8 @@ class MainWindow(QMainWindow):
         self.panel.export_requested.connect(self._export)
         v.addWidget(self.panel)
 
-        # 选中印章的微调控件
+        # 选中印章的微调控件（位置用鼠标点，不用输入框——修改意见）
         adj = QFormLayout()
-        self.pos_x_spin = QDoubleSpinBox()
-        self.pos_x_spin.setRange(0.0, 2000.0)
-        self.pos_x_spin.setSuffix(" mm")
-        self.pos_x_spin.valueChanged.connect(self._apply_adjustments)
-        self.pos_y_spin = QDoubleSpinBox()
-        self.pos_y_spin.setRange(0.0, 2000.0)
-        self.pos_y_spin.setSuffix(" mm")
-        self.pos_y_spin.valueChanged.connect(self._apply_adjustments)
         self.size_spin = QDoubleSpinBox()
         self.size_spin.setRange(3.0, 300.0)
         self.size_spin.setSuffix(" mm")
@@ -130,8 +128,6 @@ class MainWindow(QMainWindow):
         self.opa_spin.setSingleStep(0.05)
         self.opa_spin.setValue(1.0)
         self.opa_spin.valueChanged.connect(self._apply_adjustments)
-        adj.addRow("中心 X", self.pos_x_spin)
-        adj.addRow("中心 Y", self.pos_y_spin)
         adj.addRow("尺寸", self.size_spin)
         adj.addRow("旋转", self.rot_spin)
         adj.addRow("不透明度", self.opa_spin)
@@ -156,6 +152,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction("↑ 页面上移", lambda: self._move_page(-1))
         tb.addAction("↓ 页面下移", lambda: self._move_page(1))
+        tb.addSeparator()
+        tb.addAction("▣ 四点纸边校准", self._four_point_calibrate)
         self.addToolBar(tb)
 
     def _build_menu(self) -> None:
@@ -272,26 +270,57 @@ class MainWindow(QMainWindow):
     # ── 盖章交互 ──
 
     def _add_stamp(self, seal: Seal) -> None:
+        """盖章：印章跟随鼠标，在页面上点哪盖哪（修改意见）。"""
         if self.doc is None or self.current_page < 0:
             QMessageBox.information(self, "提示", "请先打开合同文件")
             return
-        page = self.doc.pages[self.current_page]
-        rec = StampRecord(
-            seal=seal,
-            center_x_mm=page.phys_w_mm / 2,
-            center_y_mm=page.phys_h_mm * 0.75,
-            size_mm=seal.phys_mm,
-        )
         # 落章即采样随机效果，预览立即所见即所得
-        rec.processed, rec.applied = self._session_rng.apply_auto(
+        processed, applied = self._session_rng.apply_auto(
             seal.image, self.panel.random_spec()
         )
+        self._pending_rec = StampRecord(
+            seal=seal,
+            center_x_mm=0.0,
+            center_y_mm=0.0,
+            size_mm=seal.phys_mm,
+            applied=applied,
+            processed=processed,
+        )
+        self.canvas.start_follow(processed, seal.phys_mm)
+        self.info_label.setText(f"「{seal.name}」跟随鼠标中——在页面上点击落位，Esc 取消")
+
+    def _on_stamp_placed(self, x_mm: float, y_mm: float) -> None:
+        rec = getattr(self, "_pending_rec", None)
+        if rec is None:
+            self.canvas.cancel_follow()
+            return
+        rec.center_x_mm = x_mm
+        rec.center_y_mm = y_mm
+        self.canvas.cancel_follow()
         self.stamps.setdefault(self.current_page, []).append(rec)
         item = self._make_stamp_item(rec)
         self.canvas.add_stamp(item)
-        # 视图跳转到新章位置，落章即所见（修复"盖完找不到章"）
         self.canvas.centerOn(item)
+        self._pending_rec = None
         self._update_info(rec)
+
+    def _on_follow_cancelled(self) -> None:
+        self._pending_rec = None
+        self.info_label.setText("已取消盖章")
+
+    def _on_canvas_clicked(self, x_mm: float, y_mm: float) -> None:
+        """空白处单击：把选中的章移过去（修改意见：鼠标直接点中心点）。"""
+        item = self.canvas.selected_stamp()
+        if item is None:
+            return
+        rec = self._find_record(item)
+        if rec is None:
+            return
+        rec.center_x_mm = x_mm
+        rec.center_y_mm = y_mm
+        item.set_center(x_mm, y_mm)
+        self._update_info(rec)
+        self._sync_adjust_spins(rec)
 
     def _add_perforation(self, seal: Seal) -> None:
         """骑缝章：对话框 → 拼合预览确认 → 切片作为 locked 记录落到各页。"""
@@ -370,22 +399,19 @@ class MainWindow(QMainWindow):
         rec = self._find_record(item)
         if rec is None:
             return
-        rec.center_x_mm = self.pos_x_spin.value()
-        rec.center_y_mm = self.pos_y_spin.value()
         rec.size_mm = self.size_spin.value()
         rec.rotation_deg = self.rot_spin.value()
         rec.opacity = self.opa_spin.value()
+        center = item.center()
         item.size_mm = rec.size_mm
         item._update_scale()
-        item.set_center(rec.center_x_mm, rec.center_y_mm)
+        item.set_center(*center)
         item.setRotation(rec.rotation_deg)
         item.setOpacity(rec.opacity)
         self._update_info(rec)
 
     def _sync_adjust_spins(self, rec: StampRecord) -> None:
         self._syncing = True
-        self.pos_x_spin.setValue(rec.center_x_mm)
-        self.pos_y_spin.setValue(rec.center_y_mm)
         self.size_spin.setValue(rec.size_mm)
         self.rot_spin.setValue(rec.rotation_deg)
         self.opa_spin.setValue(rec.opacity)
@@ -393,7 +419,7 @@ class MainWindow(QMainWindow):
 
     def _update_info(self, rec: StampRecord | None) -> None:
         if rec is None:
-            self.info_label.setText("选中页面上的印章后可微调尺寸/旋转/不透明度")
+            self.info_label.setText("选中印章后，在页面空白处单击即可移动章到点击处")
             return
         kind = "⌀" if rec.seal.kind == KIND_SEAL else "宽"
         lock = "（骑缝切片）" if rec.locked else ""
@@ -465,6 +491,67 @@ class MainWindow(QMainWindow):
                 rec.rotation_deg += 180
             rec.rotation_deg = (rec.rotation_deg + 180) % 360 - 180
         self._on_page_changed(self.current_page)
+
+    def _four_point_calibrate(self) -> None:
+        """四点纸边校准：用户在页面上点纸面四个角点（修改意见）。
+
+        扫描件自带白边 → 页面边界 ≠ 纸张边界。点完四个顶点后按透视变换
+        把页面拉伸裁正为标准 A4，白边消失、物理尺寸精确。
+        """
+        if self.doc is None or self.current_page < 0:
+            return
+        self.info_label.setText("四点校准：请依次点击纸面的 4 个角点（顺序随意），Esc 取消")
+        self.canvas.start_pick_points()
+
+    def _on_pick_cancelled(self) -> None:
+        self.info_label.setText("已取消四点校准")
+
+    def _on_points_picked(self, pts_mm: list) -> None:
+        page = self.doc.pages[self.current_page]
+        old_w_mm, old_h_mm = page.phys_w_mm, page.phys_h_mm
+        old_dpi = page.dpi
+        # 场景 mm → 页面像素
+        quad_px = np.array(
+            [[x / 25.4 * old_dpi, y / 25.4 * old_dpi] for x, y in pts_mm],
+            dtype=np.float32,
+        )
+        # 先在副本上试变换，用户确认后再应用
+        from core.autocal import map_points_through, warp_to_a4
+
+        trial = Page(image=page.image, phys_w_mm=old_w_mm, phys_h_mm=old_h_mm)
+        H = warp_to_a4(trial, quad_px)
+        if H is None:
+            QMessageBox.warning(
+                self, "四点无效",
+                "四个点围成的区域太小（可能点挤在一起或几乎共线），请重新点取纸面四角。",
+            )
+            self.canvas.cancel_pick()
+            return
+        # 预览确认
+        dlg = _WarpPreviewDialog(self, trial.image)
+        if dlg.exec() != QDialog.Accepted:
+            self.canvas.cancel_pick()
+            self._on_page_changed(self.current_page)
+            return
+        # 应用：页面图像与物理尺寸已被 trial 变换，转移回正式 page
+        # 已盖章坐标映射：旧 mm → 旧像素 →(H)→ 新像素 → 新 mm
+        new_dpi = trial.dpi
+        recs = self.stamps.get(self.current_page, [])
+        if recs:
+            old_pts = np.array(
+                [[r.center_x_mm / 25.4 * old_dpi, r.center_y_mm / 25.4 * old_dpi] for r in recs],
+                dtype=np.float32,
+            )
+            new_pts = map_points_through(H, old_pts)
+            for r, (nx, ny) in zip(recs, new_pts):
+                r.center_x_mm = float(nx) / new_dpi * 25.4
+                r.center_y_mm = float(ny) / new_dpi * 25.4
+        page.image = trial.image
+        page.phys_w_mm, page.phys_h_mm = trial.phys_w_mm, trial.phys_h_mm
+        page.needs_calibration = False
+        self.canvas.cancel_pick()
+        self._on_page_changed(self.current_page)
+        self.info_label.setText("四点校准完成：页面已拉伸为标准 A4（210×297mm）")
 
     def _calibrate(self) -> None:
         if self.doc is None:
@@ -702,6 +789,29 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "导出完成", f"已导出：\n{out_path}\n\n随机种子与参数已写入同名 .sealog"
         )
+
+
+class _WarpPreviewDialog(QDialog):
+    """四点校准预览：显示拉伸裁正后的 A4 页面，确认才应用。"""
+
+    def __init__(self, parent, warped_img: np.ndarray):
+        super().__init__(parent)
+        self.setWindowTitle("四点校准预览")
+        layout = QVBoxLayout(self)
+        hint = QLabel("页面将按你点的四个角拉伸为标准 A4，效果如下。确认应用吗？")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        pm = np_rgb_to_qpixmap(warped_img)
+        if pm.height() > 640:
+            pm = pm.scaledToHeight(640, Qt.SmoothTransformation)
+        label = QLabel()
+        label.setPixmap(pm)
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
 
 
 class _CalibrateDialog(QDialog):
