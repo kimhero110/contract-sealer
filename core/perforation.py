@@ -30,6 +30,42 @@ CAP_ROT_JITTER_DEG = 2.0
 CAP_WIDTH_JITTER = 0.4
 
 
+def detect_paper_edge_x_px(img: np.ndarray, side: str, search_ratio: float = 0.25) -> int:
+    """检测真实纸边的 x 像素位置（"自适应完美位置"的核心）。
+
+    扫描件的图像边缘 ≠ 纸张边缘（自带白边/灰边）。用列亮度剖面找
+    "纸（亮）→ 背景（暗）"的过渡带，返回最靠外的纸面列：
+    - 中部 60% 高度做剖面，避开角落污渍/装订孔；
+    - 阈值取纸内参考亮度的 80%，兼顾渐晕（扫描仪边缘发暗）；
+    - 全幅扫描（纸铺满画面、无过渡带）回退为图像边缘；
+    - 检测结果是像素，调用方负责换算 mm（各页 DPI 可能不同）。
+    """
+    import cv2
+
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
+    band = gray[int(h * 0.2) : int(h * 0.8)]
+    profile = band.mean(axis=0).astype(np.float32)
+    # 平滑抑制噪点
+    profile = cv2.GaussianBlur(profile.reshape(1, -1), (1, 15), 0).ravel()
+
+    # 纸内参考亮度：中央区域中位数
+    paper_ref = float(np.median(band[:, w // 3 : 2 * w // 3]))
+    thr = paper_ref * 0.80
+
+    limit = int(w * (1 - search_ratio))
+    if side == SIDE_RIGHT:
+        xs = range(w - 1, limit, -1)
+        fallback = w - 1
+    else:
+        xs = range(0, w - limit)
+        fallback = 0
+    for x in xs:
+        if profile[x] >= thr:
+            return x  # 最靠外的"纸面"列
+    return fallback
+
+
 @dataclass(frozen=True)
 class PerforationSpec:
     """一次骑缝章的全部参数。"""
@@ -43,6 +79,7 @@ class PerforationSpec:
     offset_jitter_mm: float = 0.5  # 逐页垂直抖动幅度
     rot_jitter_deg: float = 1.0    # 逐页旋转抖动幅度
     seed: int = 0
+    auto_edge: bool = True         # 逐页检测真实纸边并贴合（关闭则用图像边缘）
 
     def clamped(self) -> "PerforationSpec":
         return PerforationSpec(
@@ -55,6 +92,7 @@ class PerforationSpec:
             offset_jitter_mm=min(abs(self.offset_jitter_mm), CAP_OFFSET_JITTER_MM),
             rot_jitter_deg=min(abs(self.rot_jitter_deg), CAP_ROT_JITTER_DEG),
             seed=self.seed,
+            auto_edge=self.auto_edge,
         )
 
 
@@ -168,10 +206,16 @@ def plan_perforation(
             sl = _rotate_rgba(sl, drot)
 
         # 位置：右边缘贴 纸边 - inset；y 按各页独立度量
-        if spec.side == SIDE_RIGHT:
-            right_edge_mm = page.phys_w_mm - spec.inset_mm
+        if spec.auto_edge:
+            # 逐页检测真实纸边（扫描件白边/灰边自适应），各页独立
+            edge_px = detect_paper_edge_x_px(page.image, spec.side)
+            paper_edge_mm = px_to_mm_at(edge_px + (1 if spec.side == SIDE_RIGHT else 0), page.dpi)
         else:
-            right_edge_mm = spec.inset_mm + px_to_mm_at(sl.shape[1], page.dpi)
+            paper_edge_mm = page.phys_w_mm if spec.side == SIDE_RIGHT else 0.0
+        if spec.side == SIDE_RIGHT:
+            right_edge_mm = paper_edge_mm - spec.inset_mm
+        else:
+            right_edge_mm = paper_edge_mm + spec.inset_mm + px_to_mm_at(sl.shape[1], page.dpi)
         if spec.y_mm is None:
             top_mm = (page.phys_h_mm - px_to_mm_at(sl.shape[0], page.dpi)) / 2
         else:

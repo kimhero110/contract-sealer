@@ -77,9 +77,15 @@ class PerforationDialog(QDialog):
 
         self.inset_spin = QDoubleSpinBox()
         self.inset_spin.setRange(0.0, 20.0)
-        self.inset_spin.setValue(1.5)
+        self.inset_spin.setValue(0.5)
         self.inset_spin.setSuffix(" mm")
         form.addRow("切片内缩", self.inset_spin)
+
+        from PySide6.QtWidgets import QCheckBox
+
+        self.auto_edge_check = QCheckBox("自动贴合纸边（逐页检测真实纸边，消除白边留空）")
+        self.auto_edge_check.setChecked(True)
+        form.addRow(self.auto_edge_check)
 
         # 垂直位置：预设 + 自定义 mm（修改意见 #4）
         y_row = QHBoxLayout()
@@ -169,6 +175,7 @@ class PerforationDialog(QDialog):
             offset_jitter_mm=1.0 * j,
             rot_jitter_deg=2.0 * j,
             seed=self._seed,
+            auto_edge=self.auto_edge_check.isChecked(),
         )
 
     def _update_warning(self) -> None:
