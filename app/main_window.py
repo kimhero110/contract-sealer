@@ -645,17 +645,7 @@ class MainWindow(QMainWindow):
     def _show_about(self) -> None:
         from core import __version__
 
-        QMessageBox.about(
-            self,
-            "关于 合同盖章工具",
-            f"<h3>合同盖章工具</h3>"
-            f"<p>版本 v{__version__}</p>"
-            f"<p>扫描合同盖章：物理尺寸 1:1、骑缝章、手写签名。<br>"
-            f"全程本地离线运行，不修改原始文件。</p>"
-            f"<p>源码：github.com/kimhero110/contract-sealer<br>"
-            f"gitee.com/xu512/contract-sealer</p>"
-            f"<p style='color:gray'>仅限本单位已授权印章的内部流程使用。</p>",
-        )
+        AboutDialog(self, __version__).exec()
 
     def _on_selection_changed(self) -> None:
         item = self.canvas.selected_stamp()
@@ -947,6 +937,56 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "导出完成", f"已导出：\n{out_path}\n\n随机种子与参数已写入同名 .sealog"
         )
+
+
+class AboutDialog(QDialog):
+    """关于对话框：版本/链接/咖啡文案 + 内嵌赞赏码（打包进 exe，离线可见）。"""
+
+    def __init__(self, parent, version: str):
+        super().__init__(parent)
+        self.setWindowTitle("关于 合同盖章工具")
+        layout = QVBoxLayout(self)
+        text = QLabel(
+            f"<h3>合同盖章工具</h3>"
+            f"<p>版本 v{version}</p>"
+            f"<p>扫描合同盖章：物理尺寸 1:1、骑缝章、手写签名。<br>"
+            f"全程本地离线运行，不修改原始文件。</p>"
+            f"<p>源码：github.com/kimhero110/contract-sealer<br>"
+            f"gitee.com/xu512/contract-sealer</p>"
+            f"<p>☕ 这个工具没收你一分钱。<br>"
+            f"如果它帮你省过一个加班的晚上——<br>"
+            f"<b>给码农买杯咖啡，是他的福报。</b></p>"
+            f"<p style='color:gray'>仅限本单位已授权印章的内部流程使用。</p>"
+        )
+        text.setWordWrap(True)
+        layout.addWidget(text)
+
+        qr = _load_qr_pixmap(220)
+        if qr is not None:
+            img_label = QLabel()
+            img_label.setPixmap(qr)
+            img_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(img_label)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns.accepted.connect(self.accept)
+        layout.addWidget(btns)
+
+
+def _load_qr_pixmap(width: int):
+    """加载赞赏码：冻结版从 _MEIPASS，源码版从项目根目录 docs/。"""
+    import sys
+
+    from PySide6.QtGui import QPixmap
+
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    path = base / "docs" / "coffee.png"
+    if not path.exists():
+        return None
+    pm = QPixmap(str(path))
+    if pm.isNull():
+        return None
+    return pm.scaledToWidth(width, Qt.SmoothTransformation)
 
 
 class _WarpPreviewDialog(QDialog):

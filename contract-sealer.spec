@@ -15,7 +15,7 @@ a = Analysis(
     ["run_app.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("docs/coffee.png", "docs")],  # 「关于」对话框配图，冻结后从 _MEIPASS/docs 读取
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
