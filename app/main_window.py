@@ -152,7 +152,8 @@ class MainWindow(QMainWindow):
 
         from PySide6.QtWidgets import QPushButton
 
-        self.btn_delete = QPushButton("🗑 删除选中的章（Delete）")
+        self.btn_delete = QPushButton("🗑 删除选中章")
+        self.btn_delete.setToolTip("删除选中的章/签名（快捷键 Delete）")
         self.btn_delete.clicked.connect(self._delete_selected)
         v.addWidget(self.btn_delete)
 
@@ -161,17 +162,15 @@ class MainWindow(QMainWindow):
         gb = QVBoxLayout(self.group_box)
         gb.setContentsMargins(0, 0, 0, 0)
         gb.addWidget(QLabel("骑缝章整组操作："))
-        shift_row = QHBoxLayout()
         self.group_shift_spin = QDoubleSpinBox()
         self.group_shift_spin.setRange(-100.0, 100.0)
         self.group_shift_spin.setSingleStep(0.5)
-        self.group_shift_spin.setSuffix(" mm")
+        self.group_shift_spin.setSuffix(" mm（正值向下）")
         self.group_shift_spin.setValue(0.0)
+        gb.addWidget(self.group_shift_spin)
         btn_shift = QPushButton("竖向整体微调")
         btn_shift.clicked.connect(self._apply_group_shift)
-        shift_row.addWidget(self.group_shift_spin)
-        shift_row.addWidget(btn_shift)
-        gb.addLayout(shift_row)
+        gb.addWidget(btn_shift)
         self.btn_delete_group = QPushButton("删除整组骑缝章")
         self.btn_delete_group.clicked.connect(self._delete_group)
         gb.addWidget(self.btn_delete_group)
@@ -187,18 +186,21 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
 
-        # 工具栏：页面旋转 + 页序调整（修改意见 #1）
+        # 工具栏：页面旋转 + 页序调整（修改意见 #1）——短文案+悬浮提示，防挤换行
         from PySide6.QtWidgets import QToolBar
 
         tb = QToolBar("页面操作")
-        tb.addAction("↻ 顺转 90°", lambda: self._rotate_page(-1))
-        tb.addAction("↺ 逆转 90°", lambda: self._rotate_page(1))
-        tb.addAction("180°", lambda: self._rotate_page(2))
-        tb.addSeparator()
-        tb.addAction("↑ 页面上移", lambda: self._move_page(-1))
-        tb.addAction("↓ 页面下移", lambda: self._move_page(1))
-        tb.addSeparator()
-        tb.addAction("▣ 四点纸边校准", self._four_point_calibrate)
+        tb.setMovable(False)
+        for label, tip, fn in [
+            ("↻ 90°", "当前页顺时针旋转 90°", lambda: self._rotate_page(-1)),
+            ("↺ 90°", "当前页逆时针旋转 90°", lambda: self._rotate_page(1)),
+            ("180°", "当前页旋转 180°", lambda: self._rotate_page(2)),
+            ("↑ 上移", "当前页上移一位", lambda: self._move_page(-1)),
+            ("↓ 下移", "当前页下移一位", lambda: self._move_page(1)),
+            ("▣ 四点校准", "点击纸面四个角点，透视拉正为标准 A4", self._four_point_calibrate),
+        ]:
+            act = tb.addAction(label, fn)
+            act.setToolTip(tip)
         self.addToolBar(tb)
 
     def _build_menu(self) -> None:
@@ -317,10 +319,13 @@ class MainWindow(QMainWindow):
             self._sync_canvas_to_records()
         self.current_page = row
         page = self.doc.pages[row]
-        self.canvas.show_page(page.image, page.phys_w_mm, page.phys_h_mm)
+        # 显示像素限制：屏显用 ~150DPI 足够（导出仍走 300DPI 全尺寸）。
+        # 全尺寸 25MB/页的 QPixmap 是翻页卡顿的元凶之一。
+        self.canvas.show_page(
+            _display_image(page.image), page.phys_w_mm, page.phys_h_mm
+        )
         for rec in self.stamps.get(row, []):
             self.canvas.add_stamp(self._make_stamp_item(rec))
-        self._refresh_page_thumbnail(row)
 
     def _refresh_page_thumbnail(self, row: int) -> None:
         if self.doc is None:
@@ -607,6 +612,7 @@ class MainWindow(QMainWindow):
         if k_inv != 0:
             self._push_undo("旋转页面", lambda kk=k_inv: self._rotate_page(kk))
         self._on_page_changed(self.current_page)
+        self._refresh_page_thumbnail(self.current_page)  # 变异后刷新缩略图
 
     def _four_point_calibrate(self) -> None:
         """四点纸边校准：用户在页面上点纸面四个角点（修改意见）。
@@ -682,6 +688,7 @@ class MainWindow(QMainWindow):
         self._push_undo("四点纸边校准", restore_cal)
         self.canvas.cancel_pick()
         self._on_page_changed(self.current_page)
+        self._refresh_page_thumbnail(self.current_page)  # 变异后刷新缩略图
         self.info_label.setText("四点校准完成：页面已拉伸为标准 A4（210×297mm）")
 
     def _calibrate(self) -> None:
@@ -1209,6 +1216,18 @@ class _CalibrateDialog(QDialog):
 
     def values(self) -> tuple[float, float, bool]:
         return self.w_spin.value(), self.h_spin.value(), self.all_check.isChecked()
+
+
+def _display_image(img: np.ndarray, max_long_side: int = 1754) -> np.ndarray:
+    """画布显示用降采样（~150DPI A4）。全尺寸纹理只在深放大时才需要，屏显是浪费。"""
+    import cv2
+
+    h, w = img.shape[:2]
+    long_side = max(h, w)
+    if long_side <= max_long_side:
+        return img
+    scale = max_long_side / long_side
+    return cv2.resize(img, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
 
 
 def _thumbnail(img: np.ndarray, width: int) -> np.ndarray:
