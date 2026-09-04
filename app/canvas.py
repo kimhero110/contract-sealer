@@ -137,6 +137,11 @@ class PageCanvas(QGraphicsView):
         self._pick_mode = False
         self._pick_points: list = []
         self._pick_items: list = []
+        # 放大镜（精确点选辅助）：取景回调由主窗口注入
+        from app.magnifier import Magnifier
+
+        self.magnifier_source = None  # (x_mm, y_mm) -> QPixmap
+        self._magnifier = Magnifier(self.viewport())
 
     # ── 页面显示 ──
 
@@ -202,6 +207,7 @@ class PageCanvas(QGraphicsView):
             self.setDragMode(QGraphicsView.ScrollHandDrag)
             self.setMouseTracking(False)
             self.viewport().unsetCursor()
+            self._magnifier.hide()
         self._reset_press_state()
 
     @property
@@ -223,6 +229,7 @@ class PageCanvas(QGraphicsView):
         self._pick_points = []
         self._pick_items = []
         self.setDragMode(QGraphicsView.NoDrag)
+        self.setMouseTracking(True)  # 悬停也驱动放大镜
 
     def cancel_pick(self) -> None:
         self._pick_mode = False
@@ -232,6 +239,8 @@ class PageCanvas(QGraphicsView):
         self._pick_items = []
         if not self.following:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.setMouseTracking(False)
+            self._magnifier.hide()
         self._reset_press_state()
 
     @property
@@ -296,11 +305,31 @@ class PageCanvas(QGraphicsView):
             self._press_view_pos = event.position().toPoint()
         super().mousePressEvent(event)
 
+    def _update_magnifier(self, scene_pos, global_pos) -> None:
+        """精确点选模式（拾取/跟随）下驱动放大镜。"""
+        active = self._pick_mode or self._follow_item is not None
+        if active and self.magnifier_source is not None:
+            pm = self.magnifier_source(scene_pos.x(), scene_pos.y())
+            if pm is not None:
+                self._magnifier.set_crop(pm)
+                self._magnifier.follow_cursor(global_pos)
+                self._magnifier.show()
+                return
+        self._magnifier.hide()
+
     def mouseMoveEvent(self, event) -> None:
         if self._follow_item is not None:
             pos = self.mapToScene(event.position().toPoint())
             self._follow_item.set_center(pos.x(), pos.y())
+            self._update_magnifier(pos, event.globalPosition().toPoint())
             return
+        if self._pick_mode:
+            # 需要鼠标跟踪才能在未按下时也收到 move 事件
+            self.setMouseTracking(True)
+            pos = self.mapToScene(event.position().toPoint())
+            self._update_magnifier(pos, event.globalPosition().toPoint())
+            return
+        self._magnifier.hide()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
