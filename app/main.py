@@ -28,9 +28,13 @@ def main() -> int:
     app.setApplicationName("合同盖章工具")
     app.setStyle("Fusion")          # 现代扁平基座
     app.setStyleSheet(THEME_QSS)    # 自定义主题
-    from PySide6.QtGui import QFont
+    from PySide6.QtGui import QFont, QIcon
 
     app.setFont(QFont("Microsoft YaHei UI", 9))  # 统一现代中文字体
+    # 应用图标（源码运行即生效；exe 图标由 spec 的 icon= 打进文件）
+    icon_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "docs" / "icon.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     win = MainWindow()
     win.show()
     return app.exec()
