@@ -106,6 +106,7 @@ class SealPanel(QWidget):
 
         layout.addStretch(1)
         self.btn_export = QPushButton("导出已盖章 PDF…")
+        self.btn_export.setObjectName("primary")  # 主题主按钮（印章红）
         self.btn_export.setStyleSheet("font-weight: bold; padding: 8px;")
         self.btn_export.clicked.connect(self.export_requested)
         layout.addWidget(self.btn_export)
