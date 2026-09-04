@@ -235,6 +235,11 @@ class MainWindow(QMainWindow):
         m3 = self.menuBar().addMenu("批量")
         m3.addAction(batch_act)
 
+        about_act = QAction("关于…", self)
+        about_act.triggered.connect(self._show_about)
+        m4 = self.menuBar().addMenu("帮助")
+        m4.addAction(about_act)
+
     # ── 文件打开 ──
 
     def _open_files(self) -> None:
@@ -636,6 +641,21 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "自动纸边检测", msg)
 
     # ── 删除与骑缝组管理 ──
+
+    def _show_about(self) -> None:
+        from core import __version__
+
+        QMessageBox.about(
+            self,
+            "关于 合同盖章工具",
+            f"<h3>合同盖章工具</h3>"
+            f"<p>版本 v{__version__}</p>"
+            f"<p>扫描合同盖章：物理尺寸 1:1、骑缝章、手写签名。<br>"
+            f"全程本地离线运行，不修改原始文件。</p>"
+            f"<p>源码：github.com/kimhero110/contract-sealer<br>"
+            f"gitee.com/xu512/contract-sealer</p>"
+            f"<p style='color:gray'>仅限本单位已授权印章的内部流程使用。</p>",
+        )
 
     def _on_selection_changed(self) -> None:
         item = self.canvas.selected_stamp()
