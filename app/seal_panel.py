@@ -112,7 +112,9 @@ class SealPanel(QWidget):
         layout.addWidget(self.btn_export)
 
     def _make_slider(self, lo: int, hi: int, val: int) -> QSlider:
-        s = QSlider()
+        from PySide6.QtCore import Qt
+
+        s = QSlider(Qt.Horizontal)  # 显式水平——默认构造是竖向滑杆
         s.setRange(lo, hi)
         s.setValue(val)
         return s

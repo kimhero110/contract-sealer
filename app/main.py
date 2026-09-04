@@ -13,6 +13,9 @@ def main() -> int:
     app.setApplicationName("合同盖章工具")
     app.setStyle("Fusion")          # 现代扁平基座
     app.setStyleSheet(THEME_QSS)    # 自定义主题
+    from PySide6.QtGui import QFont
+
+    app.setFont(QFont("Microsoft YaHei UI", 9))  # 统一现代中文字体
     win = MainWindow()
     win.show()
     return app.exec()

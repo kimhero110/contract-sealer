@@ -108,9 +108,20 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QHBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(10, 10, 10, 10)  # 卡片四周留白
         panel_container = QWidget()
+        # 柔和投影：卡片浮起来的现代感
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(0, 0, 0, 28))
+        panel_container.setGraphicsEffect(shadow)
         v = QVBoxLayout(panel_container)
+        v.setContentsMargins(12, 10, 12, 12)
+        v.setSpacing(8)
         self.panel = SealPanel()
         self.panel.stamp_requested.connect(self._add_stamp)
         self.panel.perforation_requested.connect(self._add_perforation)
