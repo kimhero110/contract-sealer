@@ -40,15 +40,13 @@ jobs:
           cache: pip
       - name: 安装依赖
         run: pip install PyMuPDF opencv-python-headless Pillow numpy PySide6 pyinstaller
-      - name: PyInstaller 打包
-        run: pyinstaller --noconfirm --onefile --windowed --name "合同盖章工具" run_app.py
+      - name: PyInstaller 打包（spec 双输出：单文件 + 目录版，已瘦身）
+        run: pyinstaller --noconfirm contract-sealer.spec
       - name: 生成 ASCII 文件名副本（Release 附件用，避免 CI 工具链中文名乱码）
         run: Copy-Item "dist/合同盖章工具.exe" "dist/contract-sealer.exe"
-      - name: Gitee 兼容包（onedir + 7z 压到 100MB 以内）
+      - name: Gitee 兼容包（目录版 7z，压到 100MB 以内）
         if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          pyinstaller --noconfirm --onedir --windowed --name "contract-sealer" run_app.py
-          7z a -mx=9 -m0=lzma2 "dist/contract-sealer-win.7z" "dist/contract-sealer/"
+        run: 7z a -mx=9 -m0=lzma2 "dist/contract-sealer-win.7z" "dist/contract-sealer/"
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
