@@ -25,7 +25,7 @@ class Placement:
     size_mm: float       # 章=直径；签名=宽度
     scale: float = 1.0   # 物理 1:1 基础上的用户缩放（±50% 由 UI 限制）
     opacity: float = 1.0
-    rotation_deg: float = 0.0  # 用户手动旋转（随机旋转在 randomize 层）
+    rotation_deg: float = 0.0  # 与画布 Qt setRotation 同语义（导出侧内部会取负适配 PIL）
 
 
 def stamp_page(page: Page, seal_rgba: np.ndarray, placement: Placement) -> np.ndarray:
@@ -44,8 +44,11 @@ def stamp_page(page: Page, seal_rgba: np.ndarray, placement: Placement) -> np.nd
     resized = _resize_keep_alpha(seal_rgba, target_px)
 
     # 2) 手动旋转（expand 防裁切）
+    # 符号约定：Placement.rotation_deg 与画布 Qt setRotation 同语义；
+    # PIL rotate 方向与之相反——必须取负，否则用户在预览里拧正的角度
+    # 会在导出时反向旋转（误差 = 修正量的两倍，90° 修正变 180° 倒立）。
     if abs(placement.rotation_deg) > 1e-6:
-        resized = _rotate_rgba(resized, placement.rotation_deg)
+        resized = _rotate_rgba(resized, -placement.rotation_deg)
 
     # 3) 正片叠底合成
     cx = mm_to_px(placement.center_x_mm, dpi)
