@@ -272,6 +272,10 @@ class PageCanvas(QGraphicsView):
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        # 缩放上下限：0.1x ~ 20x（防止缩到消失或糊成一团）
+        sx = self.transform().m11()
+        if sx * factor < 0.1 or sx * factor > 20.0:
+            return
         self.scale(factor, factor)
 
     def mousePressEvent(self, event) -> None:
