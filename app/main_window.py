@@ -198,45 +198,67 @@ class MainWindow(QMainWindow):
             ("↑ 上移", "当前页上移一位", lambda: self._move_page(-1)),
             ("↓ 下移", "当前页下移一位", lambda: self._move_page(1)),
             ("▣ 四点校准", "点击纸面四个角点，透视拉正为标准 A4", self._four_point_calibrate),
+            ("⛶ 适应", "视图缩放至整页（快捷键 F）", self.canvas.fit_page),
         ]:
             act = tb.addAction(label, fn)
             act.setToolTip(tip)
         self.addToolBar(tb)
 
     def _build_menu(self) -> None:
+        # ── 文件：打开/导出全家（批量归入文件，不再单开顶级菜单）──
         open_act = QAction("打开合同…", self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._open_files)
-        export_act = QAction("导出…", self)
+        batch_act = QAction("批量导出…", self)
+        batch_act.triggered.connect(self._batch_export)
+        export_act = QAction("导出 PDF…", self)
         export_act.setShortcut("Ctrl+E")
         export_act.triggered.connect(self._export)
-        fit_act = QAction("适应页面", self)
-        fit_act.triggered.connect(self.canvas.fit_page)
 
-        m = self.menuBar().addMenu("文件")
-        m.addAction(open_act)
-        m.addAction(export_act)
-        m.addAction(fit_act)
+        m_file = self.menuBar().addMenu("文件")
+        m_file.addAction(open_act)
+        m_file.addAction(batch_act)
+        m_file.addSeparator()
+        m_file.addAction(export_act)
 
-        rot_cw = QAction("当前页顺时针 90°", self)
-        rot_cw.triggered.connect(lambda: self._rotate_page(-1))
-        rot_ccw = QAction("当前页逆时针 90°", self)
-        rot_ccw.triggered.connect(lambda: self._rotate_page(1))
-        rot_180 = QAction("当前页 180°", self)
-        rot_180.triggered.connect(lambda: self._rotate_page(2))
-        cal_act = QAction("纸边校准（手动）…", self)
+        # ── 编辑：撤销（紧跟文件，通行顺序）──
+        self.undo_act = QAction("撤销", self)
+        self.undo_act.setShortcut("Ctrl+Z")
+        self.undo_act.triggered.connect(self._undo)
+        m_edit = self.menuBar().addMenu("编辑")
+        m_edit.addAction(self.undo_act)
+
+        # ── 页面：旋转/页序/校准（与工具栏同源，不再互相缺项）──
+        m_page = self.menuBar().addMenu("页面")
+        m_page.addAction("顺时针旋转 90°", lambda: self._rotate_page(-1))
+        m_page.addAction("逆时针旋转 90°", lambda: self._rotate_page(1))
+        m_page.addAction("旋转 180°", lambda: self._rotate_page(2))
+        m_page.addSeparator()
+        m_page.addAction("页面上移", lambda: self._move_page(-1))
+        m_page.addAction("页面下移", lambda: self._move_page(1))
+        m_page.addSeparator()
+        m_page.addAction("四点纸边校准（点四个角）", self._four_point_calibrate)
+        cal_act = QAction("手动校准（输入尺寸）…", self)
         cal_act.triggered.connect(self._calibrate)
-        autocal_act = QAction("自动纸边检测（全部页）", self)
-        autocal_act.triggered.connect(self._auto_calibrate)
+        m_page.addAction(cal_act)
+        m_page.addAction("自动纸边检测（全部页）", self._auto_calibrate)
 
-        m2 = self.menuBar().addMenu("页面")
-        m2.addAction(rot_cw)
-        m2.addAction(rot_ccw)
-        m2.addAction(rot_180)
-        m2.addSeparator()
-        m2.addAction(cal_act)
-        m2.addAction(autocal_act)
+        # ── 视图：缩放归视图（适应页面从文件菜单迁出）──
+        m_view = self.menuBar().addMenu("视图")
+        fit_act = QAction("适应页面", self)
+        fit_act.setShortcut("F")
+        fit_act.triggered.connect(self.canvas.fit_page)
+        m_view.addAction(fit_act)
+        zoom_in = QAction("放大", self)
+        zoom_in.setShortcut("Ctrl+=")
+        zoom_in.triggered.connect(lambda: self.canvas.scale(1.25, 1.25))
+        m_view.addAction(zoom_in)
+        zoom_out = QAction("缩小", self)
+        zoom_out.setShortcut("Ctrl+-")
+        zoom_out.triggered.connect(lambda: self.canvas.scale(0.8, 0.8))
+        m_view.addAction(zoom_out)
 
+        # ── 模板（含动态列表）──
         tpl_save = QAction("把当前页存为模板…", self)
         tpl_save.triggered.connect(self._save_template)
         self.tpl_menu = self.menuBar().addMenu("模板")
@@ -244,22 +266,11 @@ class MainWindow(QMainWindow):
         self.tpl_menu.addSeparator()
         self.tpl_menu.aboutToShow.connect(self._refresh_template_menu)
 
-        batch_act = QAction("批量导出（套用模板）…", self)
-        batch_act.triggered.connect(self._batch_export)
-        m3 = self.menuBar().addMenu("批量")
-        m3.addAction(batch_act)
-
+        # ── 帮助（永远最后）──
         about_act = QAction("关于…", self)
         about_act.triggered.connect(self._show_about)
-        m4 = self.menuBar().addMenu("帮助")
-        m4.addAction(about_act)
-
-        # 撤销（P1：误删/误转/校准点歪的后悔药）
-        self.undo_act = QAction("撤销", self)
-        self.undo_act.setShortcut("Ctrl+Z")
-        self.undo_act.triggered.connect(self._undo)
-        m5 = self.menuBar().addMenu("编辑")
-        m5.addAction(self.undo_act)
+        m_help = self.menuBar().addMenu("帮助")
+        m_help.addAction(about_act)
 
     # ── 文件打开 ──
 
