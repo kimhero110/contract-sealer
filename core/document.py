@@ -258,6 +258,9 @@ class Document:
             def thumb(d, pp=path, w=w, h=h):
                 tw = max(1, round(w * d / dpi))
                 with Image.open(pp) as im:
+                    # JPEG draft 模式：DCT 域直接缩放解码，比全量解码快一个数量级
+                    # （多图文档打开/翻页的主要卡顿源，网络共享盘尤甚）
+                    im.draft("RGB", (tw * 2, max(1, round(h * tw * 2 / w))))
                     arr = np.array(ImageOps.exif_transpose(im).convert("RGB"))
                 return cv2.resize(
                     arr, (tw, max(1, round(h * tw / w))), interpolation=cv2.INTER_AREA
