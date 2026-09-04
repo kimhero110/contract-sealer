@@ -31,8 +31,8 @@
 
 | 平台 | 下载 | 说明 |
 |---|---|---|
-| GitHub | [Releases](https://github.com/kimhero110/contract-sealer/releases) | `contract-sealer.exe` 单文件，双击即用 |
-| Gitee（国内更快） | [发行版](https://gitee.com/xu512/contract-sealer/releases) | `contract-sealer-win.7z`，用 7-Zip 解压后运行（Gitee 附件限 100MB，所以压缩了一下） |
+| GitHub | [Releases](https://github.com/kimhero110/contract-sealer/releases) | `contract-sealer-vX.Y.Z.exe` 单文件，双击即用 |
+| Gitee（国内更快） | [发行版](https://gitee.com/xu512/contract-sealer/releases) | `contract-sealer-win-vX.Y.Z.7z`，用 7-Zip 解压后运行（Gitee 附件限 100MB，所以压缩了一下） |
 
 都是 Windows 版，不需要装 Python。
 

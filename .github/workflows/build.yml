@@ -42,25 +42,29 @@ jobs:
         run: pip install PyMuPDF opencv-python-headless Pillow numpy PySide6 pyinstaller
       - name: PyInstaller 打包（spec 双输出：单文件 + 目录版，已瘦身）
         run: pyinstaller --noconfirm contract-sealer.spec
-      - name: 生成 ASCII 文件名副本（Release 附件用，避免 CI 工具链中文名乱码）
-        run: Copy-Item "dist/合同盖章工具.exe" "dist/contract-sealer.exe"
+      - name: 版本号文件名（如 contract-sealer-v0.2.4.exe）
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -match '^v') { $global:VER = $ref } else { $global:VER = "dev-" + "${{ github.sha }}".Substring(0,7) }
+          Write-Output "VERSION=$global:VER" | Out-File $env:GITHUB_ENV -Append
+          Copy-Item "dist/合同盖章工具.exe" "dist/contract-sealer-$global:VER.exe"
       - name: Gitee 兼容包（目录版 7z，压到 100MB 以内）
         if: startsWith(github.ref, 'refs/tags/v')
-        run: 7z a -mx=9 -m0=lzma2 "dist/contract-sealer-win.7z" "dist/contract-sealer/"
+        run: 7z a -mx=9 -m0=lzma2 "dist/contract-sealer-win-${{ github.ref_name }}.7z" "dist/contract-sealer/"
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: contract-sealer-windows-exe
           path: |
             dist/合同盖章工具.exe
-            dist/contract-sealer.exe
-            dist/contract-sealer-win.7z
+            dist/contract-sealer-*.exe
+            dist/contract-sealer-win-*.7z
           retention-days: 30
       - name: 发布 Release（仅 v* 标签）
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/contract-sealer.exe
+          files: dist/contract-sealer-${{ github.ref_name }}.exe
           generate_release_notes: true
 
   gitee-release:
@@ -99,20 +103,21 @@ jobs:
           } catch { $rel = $null }
           if (-not $rel -or -not $rel.id) {
             $body = @{ access_token = $token; tag_name = $tag; target_commitish = "main";
-                       name = "$tag"; body = "下载 contract-sealer-win.7z，用 7-Zip 解压后运行 contract-sealer.exe（Windows，无需安装 Python）。" } | ConvertTo-Json
+                       name = "$tag"; body = "下载 contract-sealer-win-$tag.7z，用 7-Zip 解压后运行 contract-sealer.exe（Windows，无需安装 Python）。" } | ConvertTo-Json
             $rel = Invoke-RestMethod -Method Post -Uri "$base/releases" -ContentType "application/json" -Body $body
           }
           if (-not $rel.id) { throw "Gitee 发行版创建失败" }
           # 清掉同名旧附件
+          $pkg = "contract-sealer-win-$tag.7z"
           foreach ($f in @($rel.attach_files)) {
-            if ($f.name -eq "contract-sealer-win.7z") {
+            if ($f.name -eq $pkg) {
               Invoke-RestMethod -Method Delete -Uri "$base/releases/$($rel.id)/attach_files/$($f.id)`?access_token=$token" | Out-Null
             }
           }
           # 上传（--fail 让 HTTP 错误直接失败，405 不再静默通过）
-          curl.exe -sS --fail -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/contract-sealer-win.7z" --max-time 1800 --retry 3 --retry-all-errors | Out-Host
+          curl.exe -sS --fail -X POST "$base/releases/$($rel.id)/attach_files" -F "access_token=$token" -F "file=@dist/$pkg" --max-time 1800 --retry 3 --retry-all-errors | Out-Host
           if ($LASTEXITCODE -ne 0) { throw "附件上传失败: curl exit $LASTEXITCODE" }
           # 验证下载链接真实可用（Gitee 附件列表 API 会误报 0 字节，不信它，信下载）
-          $code = curl.exe -sL -o NUL -w "%{http_code}" "https://gitee.com/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}/releases/download/$tag/contract-sealer-win.7z" --max-time 120
+          $code = curl.exe -sL -o NUL -w "%{http_code}" "https://gitee.com/${{ env.GITEE_USER }}/${{ env.GITEE_REPO }}/releases/download/$tag/$pkg" --max-time 120
           if ($code -ne "200") { throw "附件下载验证失败: HTTP $code" }
           Write-Output "Gitee 发行版同步完成并验证: HTTP $code"
