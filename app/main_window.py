@@ -323,6 +323,38 @@ class MainWindow(QMainWindow):
             if ret == QMessageBox.Yes:
                 self._calibrate()
 
+    def _magnifier_crop(self, x_mm: float, y_mm: float, half_mm: float = 8.0):
+        """放大镜取景：光标 ±half_mm 的全分辨率画面，越界补边、准线恒在中心。"""
+        if self.doc is None or self.current_page < 0:
+            return None
+        from PySide6.QtGui import QPixmap
+
+        from app.canvas import np_rgb_to_qpixmap
+        from app.magnifier import HALF_WINDOW_MM
+
+        half_mm = HALF_WINDOW_MM
+        page = self.doc.pages[self.current_page]
+        dpi = page.dpi
+        cx = int(round(x_mm / 25.4 * dpi))
+        cy = int(round(y_mm / 25.4 * dpi))
+        r = int(round(half_mm / 25.4 * dpi))
+        img = page.image
+        h, w = img.shape[:2]
+        x0, y0 = max(0, cx - r), max(0, cy - r)
+        x1, y1 = min(w, cx + r), min(h, cy + r)
+        crop = img[y0:y1, x0:x1]
+        # 越界补中性灰，保证准线恒在中心（光标位置）
+        pad_l, pad_t = r - (cx - x0), r - (cy - y0)
+        pad_r, pad_b = 2 * r - crop.shape[1] - pad_l, 2 * r - crop.shape[0] - pad_t
+        if pad_l or pad_t or pad_r or pad_b:
+            crop = np.pad(
+                crop,
+                ((pad_t, pad_b), (pad_l, pad_r), (0, 0)),
+                mode="constant",
+                constant_values=205,
+            )
+        return np_rgb_to_qpixmap(np.ascontiguousarray(crop))
+
     def _on_page_changed(self, row: int, resync: bool = True) -> None:
         if self.doc is None or row < 0 or row >= len(self.doc.pages):
             return
@@ -330,6 +362,8 @@ class MainWindow(QMainWindow):
             self._sync_canvas_to_records()
         self.current_page = row
         page = self.doc.pages[row]
+        # 放大镜取景源：全分辨率 + 变异感知（旋转/校准后的页面取景同样正确）
+        self.canvas.magnifier_source = self._magnifier_crop
         # 显示像素限制：屏显用 ~150DPI 足够（导出仍走 300DPI 全尺寸）。
         # 全尺寸 25MB/页的 QPixmap 是翻页卡顿的元凶之一。
         self.canvas.show_page(
