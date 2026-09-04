@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGraphicsPixmapItem,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -102,6 +103,7 @@ class MainWindow(QMainWindow):
         self.canvas.canvas_clicked.connect(self._on_canvas_clicked)
         self.canvas.points_picked.connect(self._on_points_picked)
         self.canvas.pick_cancelled.connect(self._on_pick_cancelled)
+        self.canvas.scene().selectionChanged.connect(self._on_selection_changed)
         splitter.addWidget(self.canvas)
 
         right = QWidget()
@@ -135,6 +137,34 @@ class MainWindow(QMainWindow):
         adj.addRow("旋转", self.rot_spin)
         adj.addRow("不透明度", self.opa_spin)
         v.addLayout(adj)
+
+        from PySide6.QtWidgets import QPushButton
+
+        self.btn_delete = QPushButton("🗑 删除选中的章（Delete）")
+        self.btn_delete.clicked.connect(self._delete_selected)
+        v.addWidget(self.btn_delete)
+
+        # 骑缝组管理（选中骑缝切片时可见）
+        self.group_box = QWidget()
+        gb = QVBoxLayout(self.group_box)
+        gb.setContentsMargins(0, 0, 0, 0)
+        gb.addWidget(QLabel("骑缝章整组操作："))
+        shift_row = QHBoxLayout()
+        self.group_shift_spin = QDoubleSpinBox()
+        self.group_shift_spin.setRange(-100.0, 100.0)
+        self.group_shift_spin.setSingleStep(0.5)
+        self.group_shift_spin.setSuffix(" mm")
+        self.group_shift_spin.setValue(0.0)
+        btn_shift = QPushButton("竖向整体微调")
+        btn_shift.clicked.connect(self._apply_group_shift)
+        shift_row.addWidget(self.group_shift_spin)
+        shift_row.addWidget(btn_shift)
+        gb.addLayout(shift_row)
+        self.btn_delete_group = QPushButton("删除整组骑缝章")
+        self.btn_delete_group.clicked.connect(self._delete_group)
+        gb.addWidget(self.btn_delete_group)
+        self.group_box.setVisible(False)
+        v.addWidget(self.group_box)
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
         v.addWidget(self.info_label)
@@ -387,6 +417,9 @@ class MainWindow(QMainWindow):
         item.setRotation(rec.rotation_deg)
         item.setOpacity(rec.opacity)
         item.setData(0, id(rec))  # 画布回同步时定位记录
+        if rec.locked:
+            # 骑缝切片禁止拖拽：单片拖动会破坏跨页对齐，只能整组微调
+            item.setFlag(QGraphicsPixmapItem.ItemIsMovable, False)
         return item
 
     def _find_record(self, item: StampItem) -> StampRecord | None:
@@ -601,6 +634,66 @@ class MainWindow(QMainWindow):
         if fail:
             msg += f"\n第 {fail} 页未检测到纸边，请改用手动校准。"
         QMessageBox.information(self, "自动纸边检测", msg)
+
+    # ── 删除与骑缝组管理 ──
+
+    def _on_selection_changed(self) -> None:
+        item = self.canvas.selected_stamp()
+        rec = self._find_record(item) if item else None
+        self.group_box.setVisible(bool(rec and rec.locked))
+        if rec:
+            self._update_info(rec)
+            self._sync_adjust_spins(rec)
+
+    def _selected_record(self) -> StampRecord | None:
+        item = self.canvas.selected_stamp()
+        return self._find_record(item) if item else None
+
+    def _delete_selected(self) -> None:
+        """删除选中的章/签名（Delete 键的可视入口）。"""
+        if self.canvas.selected_stamp() is None:
+            self.info_label.setText("先点击选中一个章，再删除")
+            return
+        self.canvas.remove_selected_stamp()  # 内部发 stamps_deleted → 记录同步移除
+        self.info_label.setText("已删除")
+
+    def _delete_group(self) -> None:
+        """删除整组骑缝章（跨所有页）。"""
+        rec = self._selected_record()
+        if rec is None or not rec.locked or not rec.group:
+            return
+        gid = rec.group
+        n = 0
+        for page_idx in list(self.stamps.keys()):
+            before = len(self.stamps[page_idx])
+            self.stamps[page_idx] = [r for r in self.stamps[page_idx] if r.group != gid]
+            n += before - len(self.stamps[page_idx])
+        self.stamps = {k: v for k, v in self.stamps.items() if v}
+        self._on_page_changed(self.current_page)  # 重建画布，清掉切片贴图
+        self.info_label.setText(f"已删除整组骑缝章（{n} 个切片）")
+
+    def _apply_group_shift(self) -> None:
+        """骑缝组竖向整体微调：所有切片统一下移/上移，保留逐页抖动差。"""
+        rec = self._selected_record()
+        if rec is None or not rec.locked or not rec.group:
+            return
+        delta = self.group_shift_spin.value()
+        if abs(delta) < 1e-9:
+            return
+        gid = rec.group
+        for records in self.stamps.values():
+            for r in records:
+                if r.group == gid:
+                    r.center_y_mm += delta
+        # 先让当前页画布贴图跟上记录，再刷新——否则 _on_page_changed 的
+        # 位置回同步会把当前页的记录改回贴图旧位置（记录在贴图之前更新会被覆盖）
+        for item in self.canvas.stamps():
+            r2 = self._find_record(item)
+            if r2 is not None and r2.group == gid:
+                item.set_center(r2.center_x_mm, r2.center_y_mm)
+        self.group_shift_spin.setValue(0.0)
+        self._on_page_changed(self.current_page)
+        self.info_label.setText(f"整组骑缝章已竖向移动 {delta:+.1f}mm（逐页抖动保持）")
 
     # ── 模板（M3）──
 
