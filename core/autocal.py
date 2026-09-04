@@ -74,8 +74,13 @@ def warp_to_a4(page: Page, quad: np.ndarray, min_area_ratio: float = 0.1) -> np.
     landscape = out_w > out_h
     if landscape:
         out_w, out_h = max(out_w, out_h), min(out_w, out_h)
-    # 强制 A4 比例（纸是 A 系，比例即 √2）
-    out_h = round(out_w * (A4_H_MM / A4_W_MM))
+    # 强制 A4 比例（纸是 A 系，比例即 √2）。
+    # 注意横竖方向：竖版 H/W = 297/210，横版 H/W = 210/297——
+    # 曾经不分方向一律乘 297/210，横版纸被拉成竖版图而物理尺寸是横版（图像与物理矛盾）。
+    if landscape:
+        out_h = round(out_w * (A4_W_MM / A4_H_MM))
+    else:
+        out_h = round(out_w * (A4_H_MM / A4_W_MM))
 
     dst = np.array(
         [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],

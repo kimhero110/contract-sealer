@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageOps
 
 MM_PER_INCH = 25.4
 PT_PER_INCH = 72.0
@@ -96,11 +96,22 @@ class Page:
         return self._override is not None
 
     def thumbnail(self, dpi: float = THUMB_DPI) -> np.ndarray:
-        """低 DPI 缩略图，独立渲染，不占用全尺寸 LRU。"""
-        if self._thumbnail_fn is not None:
-            return self._thumbnail_fn(dpi)
+        """低 DPI 缩略图，独立渲染，不占用全尺寸 LRU。
+
+        变异页（旋转/四点校准后）必须从变异结果缩放——
+        用 _thumbnail_fn 会从原始文件渲染出旧方向/未校准的画面。
+        """
         import cv2
 
+        if self._override is not None:
+            h, w = self._override.shape[:2]
+            tw = max(1, round(w * dpi / self.dpi))
+            return cv2.resize(
+                self._override, (tw, max(1, round(h * tw / w))),
+                interpolation=cv2.INTER_AREA,
+            )
+        if self._thumbnail_fn is not None:
+            return self._thumbnail_fn(dpi)
         h, w = self.image.shape[:2]
         tw = max(1, round(w * dpi / self.dpi))
         return cv2.resize(self.image, (tw, max(1, round(h * tw / w))), interpolation=cv2.INTER_AREA)
@@ -239,20 +250,18 @@ class Document:
         for p in paths:
             path = Path(p)
             with Image.open(path) as im:
-                w, h = im.size  # 只读头部元数据，不加载全图
+                w, h = _exif_size(im)  # EXIF 修正后的显示尺寸（方向自愈）
 
             def render(pp=path):
-                with Image.open(pp) as im:
-                    return np.array(im.convert("RGB"))
+                return _load_rgb_exif(pp)
 
             def thumb(d, pp=path, w=w, h=h):
                 tw = max(1, round(w * d / dpi))
                 with Image.open(pp) as im:
-                    return cv2.resize(
-                        np.array(im.convert("RGB")),
-                        (tw, max(1, round(h * tw / w))),
-                        interpolation=cv2.INTER_AREA,
-                    )
+                    arr = np.array(ImageOps.exif_transpose(im).convert("RGB"))
+                return cv2.resize(
+                    arr, (tw, max(1, round(h * tw / w))), interpolation=cv2.INTER_AREA
+                )
 
             if h >= w:
                 phys_w, phys_h = A4_W_MM, A4_H_MM
@@ -277,6 +286,24 @@ class Document:
         for pg in doc.pages:
             pg._owner = doc
         return doc
+
+
+def _exif_size(im: Image.Image) -> tuple[int, int]:
+    """按 EXIF orientation 修正后的显示尺寸（手机拍照件方向自愈，只读头部不解码像素）。"""
+    w, h = im.size
+    try:
+        orientation = (im.getexif() or {}).get(274, 1)
+    except Exception:
+        orientation = 1
+    if orientation in (5, 6, 7, 8):  # 需要旋转 90° 的方向 → 宽高互换
+        return h, w
+    return w, h
+
+
+def _load_rgb_exif(path: Path) -> np.ndarray:
+    """加载图片并应用 EXIF 方向（横躺的照片自动转正）。"""
+    with Image.open(path) as im:
+        return np.array(ImageOps.exif_transpose(im).convert("RGB"))
 
 
 def calibrate_paper_edge(page: Page, paper_w_mm: float, paper_h_mm: float) -> None:

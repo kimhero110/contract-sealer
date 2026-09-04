@@ -32,7 +32,10 @@ def _load_rgb(image: str | Path | np.ndarray | Image.Image) -> np.ndarray:
     if isinstance(image, Image.Image):
         return _load_rgb(np.array(image.convert("RGBA")))
     with Image.open(image) as im:
-        return _load_rgb(np.array(im.convert("RGBA")))
+        # EXIF 方向自愈：手机拍的印章/签名照片横躺时自动转正
+        from PIL import ImageOps
+
+        return _load_rgb(np.array(ImageOps.exif_transpose(im).convert("RGBA")))
 
 
 def _remove_noise(alpha: np.ndarray, min_component_ratio: float = 0.0005) -> np.ndarray:

@@ -653,6 +653,7 @@ class MainWindow(QMainWindow):
         # 已盖章坐标映射：旧 mm → 旧像素 →(H)→ 新像素 → 新 mm
         old_image = page.image  # 引用旧数组（懒加载下可能触发一次渲染，可接受）
         old_w, old_h = page.phys_w_mm, page.phys_h_mm
+        old_flag = page.needs_calibration
         old_stamp_xy = {id(r): (r.center_x_mm, r.center_y_mm) for r in recs}
         new_dpi = trial.dpi
         recs = self.stamps.get(self.current_page, [])
@@ -670,9 +671,10 @@ class MainWindow(QMainWindow):
         page.needs_calibration = False
 
         def restore_cal(p=page, img=old_image, w=old_w, h=old_h,
-                        xy=old_stamp_xy, idx=self.current_page):
+                        xy=old_stamp_xy, idx=self.current_page, flag=old_flag):
             p.image = img
             p.phys_w_mm, p.phys_h_mm = w, h
+            p.needs_calibration = flag
             for r in self.stamps.get(idx, []):
                 if id(r) in xy:
                     r.center_x_mm, r.center_y_mm = xy[id(r)]
