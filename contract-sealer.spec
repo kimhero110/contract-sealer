@@ -15,7 +15,10 @@ a = Analysis(
     ["run_app.py"],
     pathex=[],
     binaries=[],
-    datas=[("docs/coffee.png", "docs")],  # 「关于」对话框配图，冻结后从 _MEIPASS/docs 读取
+    datas=[
+        ("docs/coffee.png", "docs"),  # 「关于」对话框配图，冻结后从 _MEIPASS/docs 读取
+        ("docs/icon.ico", "docs"),    # 应用图标（窗口 + 独立资源）
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -105,6 +108,7 @@ exe_onefile = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="docs/icon.ico",
 )
 
 # ── 目录版（Gitee 7z 分发用，压缩率更高）──
