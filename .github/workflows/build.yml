@@ -67,7 +67,7 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: PyInstaller 打包（spec 双输出：单文件 + 目录版，已瘦身）
         run: pyinstaller --noconfirm contract-sealer.spec
-      - name: 版本号文件名（如 contract-sealer-v0.4.0.exe）
+      - name: 版本号文件名（如 contract-sealer-v0.5.0.exe）
         run: |
           $ref = "${{ github.ref_name }}"
           if ($ref -match '^v') { $global:VER = $ref } else { $global:VER = "dev-" + "${{ github.sha }}".Substring(0,7) }

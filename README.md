@@ -70,7 +70,7 @@ python -m venv .venv
 
 见 [CHANGELOG.md](CHANGELOG.md)。
 
-> **v0.4.0 重写了 Git 历史**（为清除误提交的 85MB 构建产物）。此前克隆过本仓库的话，
+> **v0.5.0 重写了 Git 历史**（为清除误提交的 85MB 构建产物）。此前克隆过本仓库的话，
 > `git pull` 会失败，请改用 `git fetch origin && git reset --hard origin/main`，
 > 或者直接重新克隆。详见 CHANGELOG。
 
