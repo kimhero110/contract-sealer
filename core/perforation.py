@@ -1,8 +1,9 @@
 """骑缝章：随机宽度切片平铺算法 + 逐页放置 + 拼合预览。
 
 方案 v1.3 §4.4（唯一定义）：
-- 几何模型 = 切片平铺：每条切片完整落在页面内，右侧贴齐纸边（内缩 inset）；
-- 页序映射固定：页码升序 = 切片从左到右；
+- 几何模型 = 切片平铺：每条切片完整落在页面内，贴齐开口侧纸边（内缩 inset）；
+- 页序映射随开口方向镜像（见 slice_index_for_page）：
+  右开口 = 页码升序对应切片从左到右；左开口必须反过来；
 - 随机宽度切分：各切片宽度之和恒等于印章总宽（拼合数学上必然还原）；
 - 逐页微抖动有硬上限（垂直 ≤1mm、旋转 ≤2°），拼合断言用带容差相似度；
   旋转抖动后必须裁回原宽（见 _rotate_keep_width），否则宽度守恒被破坏；
@@ -106,6 +107,7 @@ class SlicePlacement:
     top_mm: float              # 切片顶部 y（物理 mm，页坐标系）
     y_offset_mm: float         # 实际垂直抖动量（拼合预览对齐用）
     width_px: int              # 切割宽度（原始，不含旋转扩边）
+    slice_order: int = 0       # 该切片在印章里的左起序号（拼合按它排，不按页序）
 
 
 def min_slice_warning(diameter_mm: float, page_count: int) -> str | None:
@@ -120,6 +122,21 @@ def min_slice_warning(diameter_mm: float, page_count: int) -> str | None:
             "打印不可见、骑缝验证失效。请缩小页范围或加大印章直径。"
         )
     return None
+
+
+def slice_index_for_page(page_order: int, page_count: int, side: str) -> int:
+    """页序 → 该页应当承载的切片序号（切片序号 0 = 印章最左侧那条）。
+
+    把文件按住一侧扇开，露出各页的页边条，从左到右读这些条：
+    - 右开口：页 1 在最上，往右扇开时露出的顺序是页 1、2、…、N，
+      所以页 i 拿第 i 条，页序与切片序同向；
+    - 左开口：往左扇开时越靠后的页露得越靠左，从左到右是页 N、…、2、1，
+      **必须反着发**。否则拼出来的印文左右颠倒——这正是左侧骑缝章
+      长期呈现错误的原因（位置做了镜像，页序映射没做）。
+    """
+    if side == SIDE_LEFT:
+        return page_count - 1 - page_order
+    return page_order
 
 
 def slice_widths_px(total_px: int, n: int, jitter: float, rng: np.random.Generator) -> list[int]:
@@ -197,7 +214,9 @@ def plan_perforation(
     placements: list[SlicePlacement] = []
     for order, page_idx in enumerate(page_indices):
         page = pages[page_idx]
-        sl = slices[order]
+        # 切片序号随开口方向镜像；逐页抖动仍按页序采样，换边不改变各页的抖动量
+        slice_idx = slice_index_for_page(order, len(page_indices), spec.side)
+        sl = slices[slice_idx]
 
         # 逐页微抖动（有硬上限）
         dy_mm = float(rng.uniform(-spec.offset_jitter_mm, spec.offset_jitter_mm))
@@ -229,7 +248,8 @@ def plan_perforation(
                 right_edge_mm=right_edge_mm,
                 top_mm=top_mm,
                 y_offset_mm=dy_mm,
-                width_px=widths[order],
+                width_px=widths[slice_idx],
+                slice_order=slice_idx,
             )
         )
     return placements
@@ -255,13 +275,15 @@ def apply_perforation(
 def assemble_preview(
     placements: list[SlicePlacement], ref_dpi: float, pad_mm: float = 2.0
 ) -> np.ndarray:
-    """拼合预览：按页序、实际宽度累积定位，渲染真实导出结果（所见即所得）。
+    """拼合预览：按印章内的切片序号从左到右排，渲染真实拼合结果。
 
-    逐页垂直抖动也按实际值还原——用户看到的就是打印后拼起来的样子。
+    **按 slice_order 排，不能按页序排**：左开口时两者相反，按页序排出来的
+    预览是左右颠倒的印文，而用户正是拿这张图去确认"拼得回去"的。
+    逐页垂直抖动按实际值还原——看到的就是打印后扇开拼起来的样子。
     """
     if not placements:
         raise ValueError("没有切片")
-    ordered = sorted(placements, key=lambda p: p.page_index)
+    ordered = sorted(placements, key=lambda p: p.slice_order)
     total_w = sum(p.slice_rgba.shape[1] for p in ordered)
     max_h = max(p.slice_rgba.shape[0] for p in ordered)
     pad_px = round(mm_to_px(pad_mm, ref_dpi))

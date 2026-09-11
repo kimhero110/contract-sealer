@@ -8,11 +8,14 @@ from core.extract import extract_red_seal
 from core.perforation import (
     CAP_OFFSET_JITTER_MM,
     CAP_ROT_JITTER_DEG,
+    SIDE_LEFT,
+    SIDE_RIGHT,
     PerforationSpec,
     apply_perforation,
     assemble_preview,
     min_slice_warning,
     plan_perforation,
+    slice_index_for_page,
     slice_seal,
     slice_widths_px,
 )
@@ -163,7 +166,7 @@ def test_partial_page_range():
 
 def test_left_side_marks_left_edge():
     pages = _a4_pages(2)
-    spec = PerforationSpec(seed=6, side="left", width_jitter=0.0,
+    spec = PerforationSpec(seed=6, side=SIDE_LEFT, width_jitter=0.0,
                            offset_jitter_mm=0.0, rot_jitter_deg=0.0)
     placements = plan_perforation(_red_block(), pages, [0, 1], spec)
     out = apply_perforation(pages, placements)
@@ -227,3 +230,90 @@ def test_rotation_jitter_still_rotates():
     assert any(
         not np.array_equal(a.slice_rgba, b.slice_rgba) for a, b in zip(flat, tilted, strict=True)
     ), "旋转抖动没有生效"
+
+
+# ── 左开口页序映射（回归：位置做了镜像，页序映射没做，拼出来印文左右颠倒）──
+
+def _fan_order(placements, side):
+    """把文件按 side 扇开后，从左到右看到的切片顺序。
+
+    右开口：页 1 在最上，往右扇开露出的顺序是页 1..N；
+    左开口：往左扇开时越靠后的页露得越靠左，从左到右是页 N..1。
+    """
+    by_page = sorted(placements, key=lambda p: p.page_index)
+    return by_page if side == SIDE_RIGHT else by_page[::-1]
+
+
+def _gradient_seal(w=400, h=400) -> np.ndarray:
+    """左暗右亮的不对称印章：拼反了一眼就能看出来。"""
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[:, :, 0] = np.linspace(10, 250, w).astype(np.uint8)[None, :]
+    rgba[:, :, 3] = 255
+    return rgba
+
+
+def _plan(side, n=4, **kwargs):
+    spec = {
+        "side": side, "seed": 0, "width_jitter": 0.0, "rot_jitter_deg": 0.0,
+        "offset_jitter_mm": 0.0, "auto_edge": False,
+    }
+    spec.update(kwargs)
+    return plan_perforation(_gradient_seal(), _a4_pages(n), list(range(n)), PerforationSpec(**spec))
+
+
+def test_slice_index_mapping_mirrors_with_side():
+    assert [slice_index_for_page(i, 4, SIDE_RIGHT) for i in range(4)] == [0, 1, 2, 3]
+    assert [slice_index_for_page(i, 4, SIDE_LEFT) for i in range(4)] == [3, 2, 1, 0]
+
+
+def test_left_side_gives_page_one_the_rightmost_slice():
+    """左开口时页 1 露在最右，必须拿印章最右那条。"""
+    placements = _plan(SIDE_LEFT, n=4)
+    by_page = sorted(placements, key=lambda p: p.page_index)
+    assert [p.slice_order for p in by_page] == [3, 2, 1, 0]
+
+
+def test_right_side_mapping_unchanged():
+    by_page = sorted(_plan(SIDE_RIGHT, n=4), key=lambda p: p.page_index)
+    assert [p.slice_order for p in by_page] == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("side", [SIDE_RIGHT, SIDE_LEFT])
+def test_fanned_reassembly_reproduces_seal(side):
+    """按实际扇开顺序拼回去，必须还原印章本身的左右朝向。"""
+    placements = _plan(side, n=5)
+    fanned = np.concatenate(
+        [p.slice_rgba for p in _fan_order(placements, side)], axis=1
+    )
+    profile = fanned[:, :, 0].mean(axis=0)
+    assert profile[0] < profile[-1], f"{side} 拼合结果左右颠倒"
+    original = _gradient_seal()[:, :, 0].mean(axis=0)
+    assert np.corrcoef(
+        np.interp(np.linspace(0, 1, 64), np.linspace(0, 1, len(profile)), profile),
+        np.interp(np.linspace(0, 1, 64), np.linspace(0, 1, len(original)), original),
+    )[0, 1] > 0.99
+
+
+@pytest.mark.parametrize("side", [SIDE_RIGHT, SIDE_LEFT])
+def test_assemble_preview_matches_fanned_reality(side):
+    """拼合预览就是用户拿来确认"拼得回去"的图，不能和实际扇开结果不一致。"""
+    pages = _a4_pages(4)
+    placements = _plan(side, n=4)
+    preview = assemble_preview(placements, pages[0].dpi, pad_mm=0.0)
+    fanned = np.concatenate(
+        [p.slice_rgba for p in _fan_order(placements, side)], axis=1
+    )
+    assert preview.shape[1] == fanned.shape[1]
+    # 预览是白底正片叠底的结果，比较横向亮度剖面的走向即可
+    pv = preview[:, :, 0].mean(axis=0)
+    assert (pv[0] < pv[-1]) == (fanned[:, :, 0].mean(axis=0)[0] < fanned[:, :, 0].mean(axis=0)[-1])
+
+
+def test_left_side_slice_hugs_left_paper_edge():
+    """页序反了不代表位置也该反：每片仍旧贴各自页面的左纸边。"""
+    pages = _a4_pages(3)
+    placements = _plan(SIDE_LEFT, n=3, inset_mm=2.0)
+    for p in placements:
+        width_mm = p.slice_rgba.shape[1] / pages[p.page_index].dpi * 25.4
+        left_edge_mm = p.right_edge_mm - width_mm
+        assert abs(left_edge_mm - 2.0) < 1e-6

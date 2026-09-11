@@ -73,6 +73,10 @@ class PerforationDialog(QDialog):
         self.side_combo = QComboBox()
         self.side_combo.addItem("右侧", SIDE_RIGHT)
         self.side_combo.addItem("左侧", SIDE_LEFT)
+        self.side_combo.setToolTip(
+            "切片贴哪一侧纸边。验章时按住另一侧把文件扇开，露出的页边条从左到右应拼成完整印文。\n"
+            "右侧开口：从左到右依次是第 1 页到最后一页；左侧开口顺序相反，程序已自动镜像页序。"
+        )
         form.addRow("侧边", self.side_combo)
 
         self.inset_spin = QDoubleSpinBox()
@@ -195,7 +199,7 @@ class PerforationDialog(QDialog):
             return
         ref_dpi = self._pages[self._page_indices()[0]].dpi
         img = assemble_preview(placements, ref_dpi)
-        PreviewDialog(self, img, len(placements)).exec()
+        PreviewDialog(self, img, len(placements), self.spec.side).exec()
 
     def _effect_preview(self) -> None:
         """页面效果预览：渲染切片盖在真实页面上的样子（修改意见 #4）。"""
@@ -311,13 +315,19 @@ class EffectPreviewDialog(QDialog):
 
 
 class PreviewDialog(QDialog):
-    """拼合预览：按真实导出结果渲染全部切片的拼接图。"""
+    """拼合预览：按真实扇开顺序渲染全部切片的拼接图。"""
 
-    def __init__(self, parent, img: np.ndarray, page_count: int):
+    def __init__(self, parent, img: np.ndarray, page_count: int, side: str = SIDE_RIGHT):
         super().__init__(parent)
-        self.setWindowTitle(f"拼合预览（{page_count} 页切片按页序拼接）")
+        self.setWindowTitle(f"拼合预览（{page_count} 页切片按扇开顺序拼接）")
         layout = QVBoxLayout(self)
-        hint = QLabel("以下为导出后各页骑缝条带拼接的真实效果，请确认印文连续可辨：")
+        # 左开口时扇开顺序与页序相反，说明文案必须跟着变，否则用户会以为拼错了
+        if side == SIDE_RIGHT:
+            fan = f"按住左侧把文件向右扇开，从左到右依次是第 1 页到第 {page_count} 页"
+        else:
+            fan = f"按住右侧把文件向左扇开，从左到右依次是第 {page_count} 页到第 1 页"
+        hint = QLabel(f"以下为导出后各页骑缝条带拼接的真实效果，请确认印文连续可辨。\n验章方式：{fan}。")
+        hint.setWordWrap(True)
         layout.addWidget(hint)
         pm = np_rgb_to_qpixmap(img)
         if pm.width() > 900:
