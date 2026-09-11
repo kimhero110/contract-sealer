@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGraphicsPixmapItem,
     QHBoxLayout,
     QInputDialog,
@@ -38,7 +39,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
-    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -49,6 +49,7 @@ from app.dialogs import AboutDialog, CalibrateDialog, DateStampDialog, WarpPrevi
 from app.imageutil import display_image, natural_key, thumbnail
 from app.perforation_dialog import PerforationDialog
 from app.seal_panel import SealPanel
+from app.widgets import FitButton, VScrollArea
 from core.autocal import (
     auto_calibrate_page,
     initial_quad,
@@ -147,8 +148,12 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         splitter = QSplitter()
+        # 两侧栏不许被拖没，也不许被窗口变窄挤没——挤没之前先挤文字，
+        # 用户看到的是"↻ 重盖选…"，以为程序做残了
+        splitter.setChildrenCollapsible(False)
 
         self.page_list = QListWidget()
+        self.page_list.setMinimumWidth(150)
         self.page_list.setMaximumWidth(180)
         # 多选：一次删掉整个导入文件的所有页
         self.page_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -157,6 +162,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.page_list)
 
         self.canvas = PageCanvas()
+        # 画布的最小可用尺寸。窗口整体下限由布局从各栏最小宽度推出来，
+        # 不写死——写死的数字迟早跟不上控件文案的变化。
+        self.canvas.setMinimumSize(360, 320)
         self.canvas.stamp_moved.connect(self._on_stamp_moved)
         self.canvas.stamps_deleted.connect(self._on_stamps_deleted)
         self.canvas.stamp_placed.connect(self._on_stamp_placed)
@@ -170,7 +178,11 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.canvas)
 
         splitter.addWidget(self._build_right_panel())
+        # 窗口变宽变窄，只有画布伸缩；两侧栏保持用户拖定的宽度
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([180, 740, 360])
         self.setCentralWidget(splitter)
         self._build_toolbar()
 
@@ -180,7 +192,7 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QHBoxLayout(right)
-        right_layout.setContentsMargins(10, 10, 10, 10)  # 卡片四周留白
+        right_layout.setContentsMargins(4, 4, 4, 4)
         panel_container = QWidget()
         # 柔和投影：卡片浮起来的现代感
         shadow = QGraphicsDropShadowEffect()
@@ -221,11 +233,11 @@ class MainWindow(QMainWindow):
         v.addLayout(adj)
 
         row = QHBoxLayout()
-        self.btn_restamp = QPushButton("↻ 重盖选中章")
+        self.btn_restamp = FitButton("↻ 重盖选中章")
         self.btn_restamp.setToolTip("撤掉选中的章，换一次手感重新点位置盖（Ctrl+R）")
         self.btn_restamp.clicked.connect(self._restamp_selected)
         row.addWidget(self.btn_restamp)
-        self.btn_delete = QPushButton("🗑 删除选中章")
+        self.btn_delete = FitButton("🗑 删除选中章")
         self.btn_delete.setToolTip("删除选中的章/签名（快捷键 Delete）")
         self.btn_delete.clicked.connect(self._delete_selected)
         row.addWidget(self.btn_delete)
@@ -242,10 +254,10 @@ class MainWindow(QMainWindow):
         self.group_shift_spin.setSuffix(" mm（正值向下）")
         self.group_shift_spin.setValue(0.0)
         gb.addWidget(self.group_shift_spin)
-        btn_shift = QPushButton("竖向整体微调")
+        btn_shift = FitButton("竖向整体微调")
         btn_shift.clicked.connect(self._apply_group_shift)
         gb.addWidget(btn_shift)
-        self.btn_delete_group = QPushButton("删除整组骑缝章")
+        self.btn_delete_group = FitButton("删除整组骑缝章")
         self.btn_delete_group.clicked.connect(self._delete_group)
         gb.addWidget(self.btn_delete_group)
         self.group_box.setVisible(False)
@@ -255,8 +267,21 @@ class MainWindow(QMainWindow):
         self.info_label.setWordWrap(True)
         v.addWidget(self.info_label)
 
-        right_layout.addWidget(panel_container)
-        right.setMaximumWidth(360)
+        # 窗口变矮时面板整体滚动，而不是把控件压扁到看不清
+        scroll = VScrollArea()
+        scroll.setObjectName("panelScroll")
+        scroll.setFrameShape(QFrame.NoFrame)
+        shadow_room = QWidget()  # 给卡片投影留出的一圈余地，否则会被滚动视口切掉
+        room_layout = QHBoxLayout(shadow_room)
+        room_layout.setContentsMargins(6, 6, 6, 6)
+        room_layout.addWidget(panel_container)
+        scroll.setWidget(shadow_room)
+
+        right_layout.addWidget(scroll)
+        # 注意：这里不能 setMinimumWidth——显式最小宽度会盖掉 minimumSizeHint，
+        # 面板反而可能被压到比内容还窄。下限由 FitButton → 布局 → VScrollArea
+        # 一路报上来，这里只给一个不让人拖得离谱的天花板。
+        right.setMaximumWidth(480)
         return right
 
     def _build_toolbar(self) -> None:
@@ -1036,7 +1061,8 @@ class MainWindow(QMainWindow):
         source = "已自动检测到纸面四角" if detected else "未检测到纸边，先给了个默认框"
         self.info_label.setText(
             f"四点校准：{source}。拖动蓝色把手贴住纸的四个角，"
-            "拖空白处可平移、滚轮缩放，方向键微调 0.1mm，回车确认，Esc 取消。"
+            "拖空白处可平移、滚轮缩放，方向键微调 0.1mm。\n"
+            "完成后点画布底部的「✓ 完成校准」，或按回车；取消点「✕ 取消」或按 Esc。"
         )
 
     def _on_quad_changed(self, pts_mm: list) -> None:
@@ -1050,14 +1076,16 @@ class MainWindow(QMainWindow):
         )
         ratio = quad_aspect(quad_px)
         deviation = abs(ratio - ASPECT_A_SERIES) / ASPECT_A_SERIES
-        verdict = (
-            "接近 A 系纸"
-            if deviation <= ASPECT_TOLERANCE
-            else "偏离 A 系纸，检查角点是否贴准"
-        )
+        ok = deviation <= ASPECT_TOLERANCE
+        verdict = "接近 A 系纸" if ok else "偏离 A 系纸，检查角点是否贴准"
         self.info_label.setText(
             f"当前框选长宽比 {ratio:.3f}（A 系纸为 {ASPECT_A_SERIES:.3f}）——{verdict}。\n"
-            "回车确认，Esc 取消。"
+            "点「✓ 完成校准」或按回车确认，「✕ 取消」或 Esc 取消。"
+        )
+        # 同一状态也送到画布浮条上：拖把手时视线在纸角，不在右侧信息栏。
+        # 两句提示刻意等长，拖动中确认条才不会左右抖。
+        self.canvas.set_quad_hint(
+            f"纸面比例 {ratio:.3f}　" + ("✓ 接近 A 系纸" if ok else "⚠ 偏离 A 系纸")
         )
 
     def _on_quad_cancelled(self) -> None:

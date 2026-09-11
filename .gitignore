@@ -21,3 +21,7 @@ _internal/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# 测试素材：脚本生成，不入库（tests/conftest.py 缺了会自动生成）
+/tests/fixtures/*.jpg
+/tests/fixtures/*.png

@@ -167,7 +167,7 @@ class PageCanvas(QGraphicsView):
     额外交互模式：
     - 跟随落章：印章跟随鼠标，单击落位，Esc 取消；
     - 单击移位：空白处单击（位移 <5px，区别于拖拽平移）把选中章移过去；
-    - 四点校准：四个可拖把手 + 实时四边形，回车确认，Esc 取消。
+    - 四点校准：四个可拖把手 + 实时四边形，画布底部确认条或回车确认，Esc 取消。
 
     四点校准为什么是"拖把手"而不是"点四下"：点击模型下点了就定死，
     错一个角只能整个重来；点击自带一两像素抖动，而放大镜是六倍，
@@ -205,11 +205,21 @@ class PageCanvas(QGraphicsView):
         self._quad_mode = False
         self._quad_handles: list[QuadHandle] = []
         self._quad_outline: QGraphicsPolygonItem | None = None
-        # 放大镜（精确点选辅助）：取景回调由主窗口注入
+        from app.confirmbar import ConfirmBar
         from app.magnifier import Magnifier
 
+        # 放大镜（精确点选辅助）：取景回调由主窗口注入
         self.magnifier_source = None  # (x_mm, y_mm) -> QPixmap
         self._magnifier = Magnifier(self.viewport())
+        # 四点校准的鼠标出口：不是所有人都知道要按回车，焦点也未必在画布上
+        self.quad_bar = ConfirmBar(
+            self.viewport(),
+            "拖蓝色把手贴住纸的四个角",
+            "✓ 完成校准",
+            "✕ 取消",
+        )
+        self.quad_bar.accepted.connect(self.accept_quad_adjust)
+        self.quad_bar.cancelled.connect(self.cancel_quad_from_user)
 
     # ── 页面显示 ──
 
@@ -335,10 +345,12 @@ class PageCanvas(QGraphicsView):
         self.setMouseTracking(True)
         if self._quad_handles:
             self._quad_handles[0].setSelected(True)
+        self.quad_bar.show_at_bottom()
         self.quad_changed.emit(self.quad_points())
 
     def cancel_quad_adjust(self) -> None:
         self._quad_mode = False
+        self.quad_bar.hide()
         for handle in self._quad_handles:
             handle._notify = None
             self._scene.removeItem(handle)
@@ -357,6 +369,21 @@ class PageCanvas(QGraphicsView):
 
     def quad_points(self) -> list[tuple[float, float]]:
         return [h.point() for h in self._quad_handles]
+
+    def accept_quad_adjust(self) -> None:
+        """确认当前四边形。确认条按钮与回车共用这一条路径。"""
+        if self._quad_mode:
+            self.quad_accepted.emit(self.quad_points())
+
+    def cancel_quad_from_user(self) -> None:
+        """用户主动取消（确认条按钮 / Esc）：撤掉把手并通知主窗口。"""
+        if self._quad_mode:
+            self.cancel_quad_adjust()
+            self.quad_cancelled.emit()
+
+    def set_quad_hint(self, text: str) -> None:
+        """把实时状态写到确认条上——用户的视线在画布，不在右侧信息栏。"""
+        self.quad_bar.set_hint(text)
 
     def selected_handle(self) -> QuadHandle | None:
         for handle in self._quad_handles:
@@ -407,6 +434,11 @@ class PageCanvas(QGraphicsView):
         return True
 
     # ── 事件 ──
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)  # 先让 super 更新 viewport 几何，再定位浮条
+        if self._quad_mode:
+            self.quad_bar.reposition()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
@@ -498,13 +530,12 @@ class PageCanvas(QGraphicsView):
                 self.follow_cancelled.emit()
                 return
             if self._quad_mode:
-                self.cancel_quad_adjust()
-                self.quad_cancelled.emit()
+                self.cancel_quad_from_user()
                 return
         step = 1.0 if event.modifiers() & Qt.ShiftModifier else 0.1
         if self._quad_mode:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                self.quad_accepted.emit(self.quad_points())
+                self.accept_quad_adjust()
                 return
             nudges = {
                 Qt.Key_Left: (-step, 0.0),

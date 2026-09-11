@@ -215,6 +215,23 @@ QScrollBar::handle:horizontal {{
 }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 
+/* ── 画布浮层确认条（四点校准等模式的鼠标出口） ── */
+QWidget#overlayBar {{
+    background: {PANEL_BG};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QLabel#overlayHint {{ color: {TEXT}; font-size: 13px; }}
+/* 浮条里的主按钮压扁一点，免得整条太高挡住页面 */
+QWidget#overlayBar QPushButton#primary {{ font-size: 13px; padding: 8px 16px; border-radius: 8px; }}
+QWidget#overlayBar QPushButton {{ padding: 8px 16px; }}
+
+/* ── 右侧面板滚动容器：窗口变矮时面板滚动而不是被压扁 ── */
+QScrollArea#panelScroll, QScrollArea#panelScroll > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+
 /* ── 分割条 ── */
 QSplitter::handle {{ background: transparent; }}
 QSplitter::handle:horizontal {{ width: 1px; }}

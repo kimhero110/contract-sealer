@@ -18,12 +18,12 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
-    QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
+from app.widgets import FitButton
 from core.extract import KIND_SEAL, KIND_SIGNATURE, detect_kind, extract_ink
 from core.randomize import RandomSpec
 from core.seal import (
@@ -68,13 +68,13 @@ class SealPanel(QWidget):
 
         btns = QGridLayout()
         btns.setContentsMargins(0, 0, 0, 0)
-        self.btn_import = QPushButton("导入图片…")
+        self.btn_import = FitButton("导入图片…")
         self.btn_import.clicked.connect(self._import_seal)
-        self.btn_stamp = QPushButton("盖到当前页")
+        self.btn_stamp = FitButton("盖到当前页")
         self.btn_stamp.clicked.connect(self._request_stamp)
-        self.btn_perforation = QPushButton("骑缝章…")
+        self.btn_perforation = FitButton("骑缝章…")
         self.btn_perforation.clicked.connect(self._request_perforation)
-        self.btn_delete = QPushButton("从库中删除")
+        self.btn_delete = FitButton("从库中删除")
         self.btn_delete.clicked.connect(self._delete_seal)
         btns.addWidget(self.btn_import, 0, 0)
         btns.addWidget(self.btn_stamp, 0, 1)
@@ -100,12 +100,12 @@ class SealPanel(QWidget):
             s.valueChanged.connect(self._emit_random)
         layout.addWidget(rnd_group)
 
-        self.btn_reroll = QPushButton("🎲 换一批手感")
+        self.btn_reroll = FitButton("🎲 换一批手感")
         self.btn_reroll.setToolTip("重摇所有章/签名的随机效果（骑缝切片与日期不受影响）")
         self.btn_reroll.clicked.connect(self.reroll_requested)
         layout.addWidget(self.btn_reroll)
 
-        self.btn_date = QPushButton("📅 加盖日期…")
+        self.btn_date = FitButton("📅 加盖日期…")
         self.btn_date.setToolTip("默认系统当天，也可以自己挑日期和格式（Ctrl+D）")
         self.btn_date.clicked.connect(self.date_requested)
         layout.addWidget(self.btn_date)
@@ -116,7 +116,7 @@ class SealPanel(QWidget):
         layout.addWidget(self.info_label)
 
         layout.addStretch(1)
-        self.btn_export = QPushButton("导出已盖章 PDF…")
+        self.btn_export = FitButton("导出已盖章 PDF…")
         self.btn_export.setObjectName("primary")  # 主题主按钮（印章红）
         self.btn_export.setStyleSheet("font-weight: bold; padding: 8px;")
         self.btn_export.clicked.connect(self.export_requested)

@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPushButton,
     QScrollArea,
     QSlider,
     QSpinBox,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.canvas import np_rgb_to_qpixmap
+from app.widgets import FitButton
 from core.document import Page
 from core.perforation import (
     SIDE_LEFT,
@@ -124,9 +124,9 @@ class PerforationDialog(QDialog):
         form.addRow(self.warn_label)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.effect_btn = QPushButton("页面效果预览…")
+        self.effect_btn = FitButton("页面效果预览…")
         self.effect_btn.clicked.connect(self._effect_preview)
-        self.preview_btn = QPushButton("拼合预览…")
+        self.preview_btn = FitButton("拼合预览…")
         self.preview_btn.clicked.connect(self._preview)
         btns.addButton(self.effect_btn, QDialogButtonBox.ActionRole)
         btns.addButton(self.preview_btn, QDialogButtonBox.ActionRole)
