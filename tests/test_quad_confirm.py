@@ -50,7 +50,7 @@ def test_bar_shows_only_during_calibration(qapp):
     assert not bar.isVisible()
     win._four_point_calibrate()
     qapp.processEvents()
-    assert bar.isVisible() and win.canvas.adjusting_quad()
+    assert bar.isVisible() and win.canvas.adjusting_quad
     win.canvas.cancel_quad_adjust()
     assert not bar.isVisible()
 
@@ -60,7 +60,7 @@ def test_mouse_cancel_exits_calibration(qapp):
     win._four_point_calibrate()
     QTest.mouseClick(win.canvas.quad_bar.cancel_btn, Qt.LeftButton)
     qapp.processEvents()
-    assert not win.canvas.adjusting_quad()
+    assert not win.canvas.adjusting_quad
     assert not win.canvas.quad_bar.isVisible()
     assert "取消" in win.info_label.text()
 
@@ -77,7 +77,7 @@ def test_mouse_confirm_calibrates_even_without_canvas_focus(qapp, monkeypatch):
     QTest.mouseClick(win.canvas.quad_bar.accept_btn, Qt.LeftButton)
     qapp.processEvents()
     assert abs(win.doc.pages[0].phys_w_mm - A4_W_MM) < 1e-6
-    assert not win.canvas.adjusting_quad()
+    assert not win.canvas.adjusting_quad
     assert not win.canvas.quad_bar.isVisible()
 
 

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.widgets import FitButton
+from app.widgets import ElidedLabel, FitButton
 from core.extract import KIND_SEAL, KIND_SIGNATURE, detect_kind, extract_ink
 from core.randomize import RandomSpec
 from core.seal import (
@@ -81,8 +81,8 @@ class SealPanel(QWidget):
         btns.addWidget(self.btn_perforation, 1, 0)
         btns.addWidget(self.btn_delete, 1, 1)
         lib_layout.addLayout(btns)
-        self.lib_path_label = QLabel(f"库位置：{self.library_dir}")
-        self.lib_path_label.setWordWrap(True)
+        # 路径没有空格，普通 QLabel 的 wordWrap 断不开，会把整个侧栏撑宽（见 ElidedLabel）
+        self.lib_path_label = ElidedLabel(f"库位置：{self.library_dir}")
         self.lib_path_label.setStyleSheet("color: gray; font-size: 10px;")
         lib_layout.addWidget(self.lib_path_label)
         layout.addWidget(lib_group)

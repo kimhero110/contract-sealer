@@ -14,7 +14,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import QPushButton, QScrollArea
+from PySide6.QtGui import QPainter
+from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea
 
 
 class FitButton(QPushButton):
@@ -47,3 +48,40 @@ class VScrollArea(QScrollArea):
             reserve = self.verticalScrollBar().sizeHint().width() + 2 * self.frameWidth()
             hint.setWidth(inner.minimumSizeHint().width() + reserve)
         return hint
+
+
+class ElidedLabel(QLabel):
+    """文字过长时中间省略，而不是把父容器撑宽。
+
+    `QLabel` 即使开了 `wordWrap` 也只在空格处断行。像 Windows 上的印章库路径
+    `C:\\Users\\<用户名>\\AppData\\Roaming\\contract-sealer\\seals` 整条没有空格，
+    断不开，`minimumSizeHint` 就等于整行文字宽度——右侧面板被它一路撑到 500px 开外，
+    画布跟着变窄，按钮反倒先被挤得显示不全。Linux 上路径短，这个坑照不出来。
+
+    这里自己画省略后的文字，最小宽度只报一个下限；完整内容进 tooltip，不丢信息。
+    """
+
+    def __init__(self, text: str = "", parent=None, min_width: int = 72):
+        super().__init__(text, parent)
+        self._full = text
+        self._min_width = min_width
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:
+        self._full = text
+        self.setToolTip(text)
+        super().setText(text)
+        self.update()
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self._min_width, self.fontMetrics().height() + 2)
+
+    def sizeHint(self) -> QSize:
+        # 与最小值一致：让它填满可用宽度即可，不要反过来去决定容器该多宽
+        return self.minimumSizeHint()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        text = self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, self.width())
+        painter.drawText(self.rect(), int(self.alignment()) | int(Qt.AlignVCenter), text)

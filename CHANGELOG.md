@@ -13,6 +13,17 @@
   全部界面按钮换用它——下限会沿布局链一路上报给 `QSplitter`，面板既拖不窄，
   窗口也自然算得出自己的最小尺寸，不必再拍脑袋写死。
 
+- **印章库路径标签把整个侧栏撑宽**（同一个 bug 的真正大头，只在 Windows 上现形）。
+  `QLabel` 即使开了 `wordWrap` 也只在空格处断行，而 Windows 上的库路径
+  `C:\Users\<用户名>\AppData\Roaming\contract-sealer\seals` 整条没有空格，
+  断不开，`minimumSizeHint` 就等于整行文字宽度——面板被它一路撑到 540px，
+  于是被 `setMaximumWidth` 卡住，按钮反倒先被挤得显示不全。Linux 上路径短，
+  这个坑照不出来。改用 `ElidedLabel`：中间省略、完整路径进 tooltip，
+  最小宽度与路径长度无关。新增的宽度预算测试在超支时会直接报出最宽的几个控件。
+
+  同时去掉右侧面板的 `setMaximumWidth`。天花板一旦落到内容地板之下，
+  面板会被卡在天花板上，文字照样被挤没，而且拖都拖不开——这比没有下限更糟。
+
   配套的三处：`QSplitter` 关掉 `childrenCollapsible` 并把伸缩只给画布；
   右侧面板放进 `VScrollArea`（窗口变矮时整体滚动，而不是把控件压扁）；
   右侧面板**不能**设 `setMinimumWidth`——显式最小宽度会盖掉 `minimumSizeHint`，

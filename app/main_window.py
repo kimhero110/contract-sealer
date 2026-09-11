@@ -247,11 +247,11 @@ class MainWindow(QMainWindow):
         self.group_box = QWidget()
         gb = QVBoxLayout(self.group_box)
         gb.setContentsMargins(0, 0, 0, 0)
-        gb.addWidget(QLabel("骑缝章整组操作："))
+        gb.addWidget(QLabel("骑缝章整组操作（正值向下）："))
         self.group_shift_spin = QDoubleSpinBox()
         self.group_shift_spin.setRange(-100.0, 100.0)
         self.group_shift_spin.setSingleStep(0.5)
-        self.group_shift_spin.setSuffix(" mm（正值向下）")
+        self.group_shift_spin.setSuffix(" mm")  # 后缀文字会计进 spinbox 宽度，说明挪到标签里
         self.group_shift_spin.setValue(0.0)
         gb.addWidget(self.group_shift_spin)
         btn_shift = FitButton("竖向整体微调")
@@ -278,10 +278,11 @@ class MainWindow(QMainWindow):
         scroll.setWidget(shadow_room)
 
         right_layout.addWidget(scroll)
-        # 注意：这里不能 setMinimumWidth——显式最小宽度会盖掉 minimumSizeHint，
-        # 面板反而可能被压到比内容还窄。下限由 FitButton → 布局 → VScrollArea
-        # 一路报上来，这里只给一个不让人拖得离谱的天花板。
-        right.setMaximumWidth(480)
+        # 这里既不设 setMinimumWidth 也不设 setMaximumWidth。前者会盖掉 minimumSizeHint，
+        # 面板反而可能被压到比内容还窄；后者更阴——天花板一旦落到内容地板之下，
+        # 面板被卡在天花板上，文字照样被挤没，而且这回是硬伤，拖也拖不开。
+        # 宽度由 FitButton / ElidedLabel → 布局 → VScrollArea 一路如实上报，
+        # 初始值由下面的 setSizes 给，之后归用户拖。
         return right
 
     def _build_toolbar(self) -> None:
