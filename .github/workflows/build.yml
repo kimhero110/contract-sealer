@@ -50,7 +50,19 @@ jobs:
       - name: 运行测试
         env:
           QT_QPA_PLATFORM: offscreen  # GUI 测试无显示环境
-        run: pytest tests -q
+        shell: pwsh
+        # 失败摘要写进 annotation：Actions 日志要登录才看得到，annotation 公开可读，
+        # 提交页上直接能看到是哪条断言挂了，不必进 Web UI 翻日志
+        run: |
+          $out = pytest tests -q --tb=short -rf 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            $tail = $out.Substring([Math]::Max(0, $out.Length - 3500))
+            $msg = $tail -replace "`r", "" -replace "`n", "%0A" -replace "::", "∷"
+            Write-Host "::error title=pytest 失败::$msg"
+            exit $code
+          }
 
   build:
     name: 打包 Windows exe
