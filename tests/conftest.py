@@ -9,6 +9,7 @@
 这样即便某个模块在导入期就读素材也来得及。
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,7 +24,21 @@ _REQUIRED = ("1.jpg", "2.jpg", "3.jpg", "seal_company.png", "seal_person.png",
 def _ensure_fixtures() -> None:
     if all((FIXTURES / name).exists() for name in _REQUIRED):
         return
-    subprocess.run([sys.executable, str(FIXTURES / "generate_fixtures.py")], check=True)
+    # 子进程的 stdout 是管道时，Python 按本地代码页编码输出（英文 Windows 上是 cp1252），
+    # 生成脚本里的中文提示会直接把它撑成 UnicodeEncodeError。强制 UTF-8。
+    proc = subprocess.run(
+        [sys.executable, str(FIXTURES / "generate_fixtures.py")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    if proc.returncode != 0:
+        # 光报 CalledProcessError 只能看到一句退出码，真正的原因在子进程输出里
+        raise RuntimeError(
+            "生成测试素材失败：\n" + (proc.stdout or "") + (proc.stderr or "")
+        )
     missing = [n for n in _REQUIRED if not (FIXTURES / n).exists()]
     if missing:  # 生成脚本改了名字却没改这里，不能让它变成一堆看不懂的读文件失败
         raise RuntimeError(f"素材生成后仍缺少：{missing}")

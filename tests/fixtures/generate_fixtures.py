@@ -6,6 +6,7 @@
     python tests/fixtures/generate_fixtures.py
 """
 
+import sys
 from pathlib import Path
 
 import cv2
@@ -130,6 +131,10 @@ def main() -> None:
     make_square_seal(HERE / "seal_person.png", "张三")
     make_signature(HERE / "sig_lsl.png", seed=11)
     make_signature(HERE / "sig_hxd.png", seed=22, w=700, h=900)
+    # Windows 上 stdout 若不是 UTF-8（英文机器的控制台代码页、或被重定向成管道），
+    # 这行中文会直接把脚本撑成 UnicodeEncodeError——生成图片全都成功了却以失败告终。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("合成素材已生成到", HERE)
 
 
