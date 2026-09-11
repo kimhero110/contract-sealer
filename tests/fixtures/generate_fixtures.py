@@ -71,7 +71,7 @@ def make_square_seal(path: Path, name: str, size: int = 500):
     m = size // 20
     d.rectangle([m, m, size - m, size - m], outline=red, width=max(5, size // 60))
     f = _font(int(size * 0.28))
-    chars = list(name) + ["印"]
+    chars = [*name, "印"]
     per_row = 2
     for i, ch in enumerate(chars[:4]):
         row, col = divmod(i, per_row)
@@ -113,7 +113,6 @@ def make_contract_page(path: Path, page_no: int, w: int = 2544, h: int = 3504):
     d = ImageDraw.Draw(pil)
     d.text((w // 2 - 200, 150), f"测试合同 第{page_no}页", font=_font(72), fill=(30, 30, 30))
     while y < h - 400:
-        line_w = int(w * rng.uniform(0.55, 0.8))
         d.text((200, y), "这是一段用于测试的合同条款文字，仅作合成素材。" * 2, font=f, fill=(50, 50, 50))
         y += 90
     # 轻微扫描噪声与底色不均

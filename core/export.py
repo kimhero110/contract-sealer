@@ -55,7 +55,7 @@ def export_pdf(
 
     try:
         doc = pymupdf.open()
-        for page, img in zip(pages, images):
+        for page, img in zip(pages, images, strict=True):
             w_pt = page.phys_w_mm / MM_PER_INCH * PT_PER_INCH
             h_pt = page.phys_h_mm / MM_PER_INCH * PT_PER_INCH
             pdf_page = doc.new_page(width=w_pt, height=h_pt)

@@ -2,10 +2,11 @@
 
 import numpy as np
 import pytest
-from PySide6.QtWidgets import QApplication, QListWidgetItem, QGraphicsPixmapItem
 
-from app.canvas import np_rgb_to_qpixmap
-from app.main_window import MainWindow, StampRecord, _thumbnail
+pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
+from PySide6.QtWidgets import QApplication, QGraphicsPixmapItem
+
+from app.main_window import MainWindow, StampRecord
 from core.document import Document
 from core.extract import extract_ink
 from core.perforation import PerforationSpec, plan_perforation
@@ -28,11 +29,7 @@ def _seal() -> Seal:
 def _make_window(qapp, n=3) -> MainWindow:
     win = MainWindow()
     win.doc = Document.from_images([f"{FIX}/{i}.jpg" for i in range(1, n + 1)])
-    for i, page in enumerate(win.doc.pages):
-        win.page_list.addItem(
-            QListWidgetItem(np_rgb_to_qpixmap(_thumbnail(page.image, 120)), f"第 {i + 1} 页")
-        )
-    win.page_list.setCurrentRow(0)
+    win._rebuild_page_list(select=0)
     win.show()
     return win
 
@@ -78,7 +75,7 @@ def test_delete_selected_button(qapp):
 
 def test_delete_group_across_pages(qapp):
     win = _make_window(qapp, n=3)
-    gid = _add_perf_group(win)
+    _add_perf_group(win)
     assert sum(len(v) for v in win.stamps.values()) == 3
     # 选中当前页（第 1 页）的切片
     slice_item = win.canvas.stamps()[0]
@@ -100,7 +97,7 @@ def test_group_shift_preserves_jitter(qapp):
     win.group_shift_spin.setValue(5.0)
     win._apply_group_shift()
     after_ys = [r.center_y_mm for r in recs]
-    for b, a in zip(before_ys, after_ys):
+    for b, a in zip(before_ys, after_ys, strict=True):
         assert abs(a - b - 5.0) < 1e-6
     # 逐页抖动差保持
     before_diffs = np.diff(sorted(before_ys))

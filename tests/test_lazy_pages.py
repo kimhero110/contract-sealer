@@ -2,15 +2,14 @@
 
 import numpy as np
 import pymupdf
-import pytest
 
-from core.document import Document, Page, PAGE_CACHE_LIMIT
+from core.document import PAGE_CACHE_LIMIT, Document, Page
 
 
 def _multipage_pdf(tmp_path, n=10, size_pt=(595, 842)) -> object:
     path = tmp_path / "big.pdf"
     doc = pymupdf.open()
-    for i in range(n):
+    for _ in range(n):
         page = doc.new_page(width=size_pt[0], height=size_pt[1])
         page.draw_rect(pymupdf.Rect(50, 50, 200, 200), color=(0.8, 0.1, 0.1), fill=(0.9, 0.2, 0.2))
     doc.save(path)

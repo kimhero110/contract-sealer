@@ -5,16 +5,16 @@
 - 页序映射固定：页码升序 = 切片从左到右；
 - 随机宽度切分：各切片宽度之和恒等于印章总宽（拼合数学上必然还原）；
 - 逐页微抖动有硬上限（垂直 ≤1mm、旋转 ≤2°），拼合断言用带容差相似度；
+  旋转抖动后必须裁回原宽（见 _rotate_keep_width），否则宽度守恒被破坏；
 - 最小切片宽度约束：W/N < 1.5mm 时拒绝（切片过窄骑缝失效）；
 - y 按各页纸边独立度量（混尺寸页面安全）。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image
 
 from .document import Page, mm_to_px
 from .stamp import _multiply_composite, _rotate_rgba
@@ -81,7 +81,7 @@ class PerforationSpec:
     seed: int = 0
     auto_edge: bool = True         # 逐页检测真实纸边并贴合（关闭则用图像边缘）
 
-    def clamped(self) -> "PerforationSpec":
+    def clamped(self) -> PerforationSpec:
         return PerforationSpec(
             diameter_mm=self.diameter_mm,
             side=self.side,
@@ -203,7 +203,7 @@ def plan_perforation(
         dy_mm = float(rng.uniform(-spec.offset_jitter_mm, spec.offset_jitter_mm))
         drot = float(rng.uniform(-spec.rot_jitter_deg, spec.rot_jitter_deg))
         if abs(drot) > 1e-6:
-            sl = _rotate_rgba(sl, drot)
+            sl = _rotate_keep_width(sl, drot)
 
         # 位置：右边缘贴 纸边 - inset；y 按各页独立度量
         if spec.auto_edge:
@@ -288,6 +288,24 @@ def assemble_preview(
         ).astype(np.uint8)
         x += sl.shape[1]
     return canvas
+
+
+def _rotate_keep_width(rgba: np.ndarray, angle_deg: float) -> np.ndarray:
+    """旋转切片但保持宽度不变（居中裁回），高度允许扩边。
+
+    PIL rotate 的 expand 会把位图撑宽 |w·cosθ| + |h·sinθ|：40mm 章切 5 片、
+    抖动 1° 时每片多出约 0.7mm（≈9%）。撑宽后各切片宽度之和不再等于印章
+    总宽，拼合预览偏宽、导出时每片墨迹相对纸边内移半个扩边量——
+    §4.4 的"宽度守恒"就是这么被悄悄破坏的。切片在纸上占的宽度是它的
+    页序配额，必须严格守住，代价是旋出侧边的极窄墨迹被裁掉（亚 0.4mm）。
+    """
+    target_w = rgba.shape[1]
+    rotated = _rotate_rgba(rgba, angle_deg)
+    extra = rotated.shape[1] - target_w
+    if extra <= 0:
+        return rotated
+    left = extra // 2
+    return np.ascontiguousarray(rotated[:, left : left + target_w])
 
 
 def px_to_mm_at(px: float, dpi: float) -> float:

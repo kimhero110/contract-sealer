@@ -1,19 +1,39 @@
 [project]
 name = "contract-sealer"
-version = "0.1.0"
-description = "扫描合同盖章工具：物理尺寸 1:1 盖章、骑缝章、手写签名，本地离线运行"
+version = "0.4.0"  # 与 core/__init__.py 的 __version__ 保持一致（test_project_meta 会验）
+description = "扫描合同盖章工具：物理尺寸 1:1 盖章、骑缝章、手写签名、日期戳，本地离线运行"
 requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
 dependencies = [
     "PyMuPDF>=1.24",
     "opencv-python-headless>=4.8",
-    "Pillow>=10.0",
+    "Pillow>=10.1",  # load_default(size=) 需要 10.1
     "numpy>=1.26",
     "PySide6>=6.6",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["_internal", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+    "E501",    # 行宽交给 formatter，中文注释按字符数算不准
+    "RUF001",  # 中文全角标点本来就该用
+    "RUF002",
+    "RUF003",
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里 pytest.importorskip 必须在 import PySide6 之前执行
+"tests/*" = ["E402"]

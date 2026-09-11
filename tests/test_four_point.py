@@ -1,8 +1,7 @@
 """四点纸边校准测试（修改意见）：用户点四顶点 → 透视拉伸为标准 A4。"""
 
-import numpy as np
 import cv2
-import pytest
+import numpy as np
 
 from core.autocal import map_points_through, warp_to_a4
 from core.document import A4_H_MM, A4_W_MM, Page

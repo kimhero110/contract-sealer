@@ -73,7 +73,7 @@ def extract_red_seal(image: str | Path | np.ndarray | Image.Image, strength: flo
     b = rgb[:, :, 2].astype(np.float32)
 
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
-    h, s, v = hsv[:, :, 0], hsv[:, :, 1] / 255.0, hsv[:, :, 2] / 255.0
+    h, s = hsv[:, :, 0], hsv[:, :, 1] / 255.0
 
     # 红色色相区间（OpenCV H: 0-179，红色跨 0 点）
     red_hue = ((h <= 14) | (h >= 160)).astype(np.float32)

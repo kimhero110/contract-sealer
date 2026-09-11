@@ -1,13 +1,11 @@
 """全量猎虫第二轮修复的回归测试：缩略图陈旧/横版校准/EXIF 方向/校准撤销标志。"""
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from core.autocal import warp_to_a4
 from core.document import A4_H_MM, A4_W_MM, Document, Page
 from core.extract import extract_ink
-
 
 # ── BUG A：变异页缩略图必须反映旋转/校准后的画面 ──
 

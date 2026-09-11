@@ -7,7 +7,8 @@
 import cv2
 import numpy as np
 import pytest
-from PySide6.QtCore import QPointF
+
+pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QGraphicsScene
 
@@ -81,7 +82,7 @@ def test_zero_and_180_rotation_unchanged(qapp):
     page = Page(image=np.full((565, 400, 3), 255, np.uint8), phys_w_mm=210.0, phys_h_mm=297.0)
     out0 = stamp_page(page, arrow, Placement(105.0, 148.5, 40.0, rotation_deg=0.0))
     out180 = stamp_page(page, arrow, Placement(105.0, 148.5, 40.0, rotation_deg=180.0))
-    dx0, dy0 = _ink_centroid_offset(out0, (200, 282.5))
-    dx180, dy180 = _ink_centroid_offset(out180, (200, 282.5))
+    _dx0, dy0 = _ink_centroid_offset(out0, (200, 282.5))
+    _dx180, dy180 = _ink_centroid_offset(out180, (200, 282.5))
     # 0°：上箭头质心偏下（dy > 0）；180°：质心偏上（dy < 0）
     assert dy0 > 1 and dy180 < -1

@@ -8,7 +8,6 @@ from core.extract import extract_red_seal
 from core.perforation import (
     CAP_OFFSET_JITTER_MM,
     CAP_ROT_JITTER_DEG,
-    MIN_SLICE_WIDTH_MM,
     PerforationSpec,
     apply_perforation,
     assemble_preview,
@@ -174,3 +173,57 @@ def test_left_side_marks_left_edge():
         left_ink = (255 - left_strip.mean(axis=2)).mean()
         right_ink = (255 - right_strip.mean(axis=2)).mean()
         assert left_ink > right_ink + 1
+
+
+# ── 旋转抖动下的宽度守恒（回归：PIL expand 把切片撑宽，守恒被悄悄破坏）──
+
+def test_rotation_jitter_preserves_slice_widths():
+    """开了逐页旋转抖动后，切片实际宽度之和仍须等于印章总宽。
+
+    PIL rotate 的 expand 会把位图撑宽 |w·cosθ| + |h·sinθ|。不裁回原宽的话，
+    40mm 章切 5 片、抖动 1° 时每片多出约 0.7mm（≈9%），拼合预览偏宽、
+    导出时每片墨迹相对纸边内移半个扩边量。
+    """
+    pages = _a4_pages(5)
+    total_px = max(5, round(mm_to_px(40.0, pages[0].dpi)))
+    for seed in range(20):
+        placements = plan_perforation(
+            _red_block(),
+            pages,
+            [0, 1, 2, 3, 4],
+            PerforationSpec(seed=seed, rot_jitter_deg=CAP_ROT_JITTER_DEG, auto_edge=False),
+        )
+        actual = sum(p.slice_rgba.shape[1] for p in placements)
+        declared = sum(p.width_px for p in placements)
+        assert actual == total_px, f"seed={seed} 旋转后宽度和 {actual} != {total_px}"
+        assert declared == total_px, f"seed={seed} 声明宽度和 {declared} != {total_px}"
+
+
+def test_assemble_preview_width_matches_seal_width():
+    """拼合预览的墨迹总宽 = 印章宽（±padding），不能被旋转扩边撑胖。"""
+    pages = _a4_pages(4)
+    total_px = round(mm_to_px(40.0, pages[0].dpi))
+    placements = plan_perforation(
+        _red_block(),
+        pages,
+        [0, 1, 2, 3],
+        PerforationSpec(seed=5, rot_jitter_deg=CAP_ROT_JITTER_DEG, auto_edge=False),
+    )
+    pad_mm = 2.0
+    canvas = assemble_preview(placements, pages[0].dpi, pad_mm=pad_mm)
+    pad_px = round(mm_to_px(pad_mm, pages[0].dpi))
+    assert canvas.shape[1] == total_px + 2 * pad_px
+
+
+def test_rotation_jitter_still_rotates():
+    """裁回原宽不等于把旋转裁没了：抖动后的切片不应与未抖动的完全相同。"""
+    pages = _a4_pages(3)
+    seal = _red_block()
+    seal[: seal.shape[0] // 2] = 0  # 上下不对称，旋转后必然有差异
+    seal[: seal.shape[0] // 2, :, 3] = 0
+    common = {"auto_edge": False, "offset_jitter_mm": 0.0, "width_jitter": 0.0}
+    flat = plan_perforation(seal, pages, [0, 1, 2], PerforationSpec(seed=1, rot_jitter_deg=0.0, **common))
+    tilted = plan_perforation(seal, pages, [0, 1, 2], PerforationSpec(seed=1, rot_jitter_deg=CAP_ROT_JITTER_DEG, **common))
+    assert any(
+        not np.array_equal(a.slice_rgba, b.slice_rgba) for a, b in zip(flat, tilted, strict=True)
+    ), "旋转抖动没有生效"

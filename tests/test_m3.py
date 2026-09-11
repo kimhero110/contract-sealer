@@ -1,7 +1,7 @@
 """M3 测试：自动纸边检测、模板、骑缝章-导出集成。"""
 
-import numpy as np
 import cv2
+import numpy as np
 
 from core.autocal import auto_calibrate_page, detect_paper_quad
 from core.document import A4_H_MM, A4_W_MM, Page

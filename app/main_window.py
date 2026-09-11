@@ -5,20 +5,27 @@
 - 每页若干 StampRecord（印章 + 物理位置/尺寸/旋转/不透明度 + 已采样随机效果）；
 - 预览与导出共用同一份 processed 图像——所见即所得（方案 §4.9）；
 - 骑缝章切片是 locked 记录：随机在生成时已定，导出不再重采样（方案 §4.4）。
+
+撤销/重做：快照式命令栈（见 _command）。每个会改状态的动作把"改之前"
+与"改之后"两份快照压栈，撤销与重做就是把对应快照写回去。
+（旧实现是逐个动作手写逆操作闭包：漏一个字段就是一个静默 bug，而且
+天生做不了重做。四点校准那条逆操作还引用了尚未赋值的局部变量。）
 """
 
 from __future__ import annotations
 
 import secrets
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -30,26 +37,48 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
+    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from app.canvas import PageCanvas, StampItem, np_rgb_to_qpixmap
+from app.dialogs import AboutDialog, CalibrateDialog, DateStampDialog, WarpPreviewDialog
+from app.imageutil import display_image, natural_key, thumbnail
 from app.perforation_dialog import PerforationDialog
 from app.seal_panel import SealPanel
-from core.autocal import auto_calibrate_page
+from core.autocal import auto_calibrate_page, map_points_through, warp_to_a4
+from core.datestamp import KIND_DATE, ink_width_mm, render_date_ink
 from core.document import Document, Page, calibrate_paper_edge
 from core.export import export_pdf, make_output_path
-from core.perforation import PerforationSpec, apply_perforation, plan_perforation
+from core.perforation import PerforationSpec, SlicePlacement, plan_perforation
 from core.randomize import AppliedRandom, Randomizer
 from core.seal import KIND_SEAL, Seal, default_library_dir, list_library
+from core.settings import Settings
 from core.stamp import Placement, stamp_page
 from core.template import (
     default_template_dir,
     list_templates,
     load_template,
     save_template,
+)
+
+MM_PER_INCH = 25.4
+UNDO_LIMIT = 50
+
+# 撤销快照要还原的记录字段。新增可变字段必须同步加进来，否则撤销会漏改。
+_RECORD_FIELDS = (
+    "center_x_mm",
+    "center_y_mm",
+    "size_mm",
+    "rotation_deg",
+    "opacity",
+    "applied",
+    "processed",
+    "locked",
+    "group",
 )
 
 
@@ -67,6 +96,17 @@ class StampRecord:
     group: str | None = None             # 骑缝章分组标识（sealog 用）
 
 
+@dataclass
+class _Snapshot:
+    """一份可完整还原的会话状态。页与记录都存对象引用 + 字段值，不深拷像素。"""
+
+    pages: list[Page]
+    # (变异图像, 图像版本号, 物理宽, 物理高, 待校准标志)
+    page_state: list[tuple[np.ndarray | None, int, float, float, bool]]
+    stamps: dict[int, list[tuple[StampRecord, tuple]]]
+    current: int
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -76,14 +116,20 @@ class MainWindow(QMainWindow):
         self.doc: Document | None = None
         self.stamps: dict[int, list[StampRecord]] = {}
         self.current_page = -1
+        self.settings = Settings.load()
         self._syncing = False
-        self._undo_stack: list[tuple[str, object]] = []  # (描述, 逆操作闭包)
+        self._pending_rec: StampRecord | None = None
+        self._undo_stack: list[tuple[str, _Snapshot, _Snapshot]] = []
+        self._redo_stack: list[tuple[str, _Snapshot, _Snapshot]] = []
+        # 页缩略图缓存：键含"当前变异图像"的身份，旋转/校准后自动失效
+        self._thumb_cache: dict[tuple[int, int], object] = {}
         # 会话随机器：落章即采样，预览立即带真实感
         self._session_rng = Randomizer(secrets.randbelow(2**31 - 1))
 
         self._build_ui()
         self._build_menu()
         self._update_info(None)
+        self._update_history_actions()
 
     # ── UI 搭建 ──
 
@@ -91,8 +137,11 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
 
         self.page_list = QListWidget()
-        self.page_list.setMaximumWidth(160)
+        self.page_list.setMaximumWidth(180)
+        # 多选：一次删掉整个导入文件的所有页
+        self.page_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.page_list.currentRowChanged.connect(self._on_page_changed)
+        self.page_list.setContextMenuPolicy(Qt.ActionsContextMenu)
         splitter.addWidget(self.page_list)
 
         self.canvas = PageCanvas()
@@ -107,14 +156,20 @@ class MainWindow(QMainWindow):
         self.canvas.scene().selectionChanged.connect(self._on_selection_changed)
         splitter.addWidget(self.canvas)
 
+        splitter.addWidget(self._build_right_panel())
+        splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(splitter)
+        self._build_toolbar()
+
+    def _build_right_panel(self) -> QWidget:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+
         right = QWidget()
         right_layout = QHBoxLayout(right)
         right_layout.setContentsMargins(10, 10, 10, 10)  # 卡片四周留白
         panel_container = QWidget()
         # 柔和投影：卡片浮起来的现代感
-        from PySide6.QtWidgets import QGraphicsDropShadowEffect
-        from PySide6.QtGui import QColor
-
         shadow = QGraphicsDropShadowEffect()
         shadow.setBlurRadius(24)
         shadow.setOffset(0, 3)
@@ -123,10 +178,12 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(panel_container)
         v.setContentsMargins(12, 10, 12, 12)
         v.setSpacing(8)
+
         self.panel = SealPanel()
         self.panel.stamp_requested.connect(self._add_stamp)
         self.panel.perforation_requested.connect(self._add_perforation)
         self.panel.reroll_requested.connect(self._reroll_random)
+        self.panel.date_requested.connect(self._add_date_stamp)
         self.panel.export_requested.connect(self._export)
         v.addWidget(self.panel)
 
@@ -150,12 +207,16 @@ class MainWindow(QMainWindow):
         adj.addRow("不透明度", self.opa_spin)
         v.addLayout(adj)
 
-        from PySide6.QtWidgets import QPushButton
-
+        row = QHBoxLayout()
+        self.btn_restamp = QPushButton("↻ 重盖选中章")
+        self.btn_restamp.setToolTip("撤掉选中的章，换一次手感重新点位置盖（Ctrl+R）")
+        self.btn_restamp.clicked.connect(self._restamp_selected)
+        row.addWidget(self.btn_restamp)
         self.btn_delete = QPushButton("🗑 删除选中章")
         self.btn_delete.setToolTip("删除选中的章/签名（快捷键 Delete）")
         self.btn_delete.clicked.connect(self._delete_selected)
-        v.addWidget(self.btn_delete)
+        row.addWidget(self.btn_delete)
+        v.addLayout(row)
 
         # 骑缝组管理（选中骑缝切片时可见）
         self.group_box = QWidget()
@@ -176,17 +237,17 @@ class MainWindow(QMainWindow):
         gb.addWidget(self.btn_delete_group)
         self.group_box.setVisible(False)
         v.addWidget(self.group_box)
+
         self.info_label = QLabel("")
         self.info_label.setWordWrap(True)
         v.addWidget(self.info_label)
 
         right_layout.addWidget(panel_container)
         right.setMaximumWidth(360)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        return right
 
-        # 工具栏：页面旋转 + 页序调整（修改意见 #1）——短文案+悬浮提示，防挤换行
+    def _build_toolbar(self) -> None:
+        """工具栏：页面旋转 + 页序调整——短文案+悬浮提示，防挤换行。"""
         from PySide6.QtWidgets import QToolBar
 
         tb = QToolBar("页面操作")
@@ -197,6 +258,7 @@ class MainWindow(QMainWindow):
             ("180°", "当前页旋转 180°", lambda: self._rotate_page(2)),
             ("↑ 上移", "当前页上移一位", lambda: self._move_page(-1)),
             ("↓ 下移", "当前页下移一位", lambda: self._move_page(1)),
+            ("✖ 删除页", "删除页列表里选中的页（可撤销）", self._delete_pages),
             ("▣ 四点校准", "点击纸面四个角点，透视拉正为标准 A4", self._four_point_calibrate),
             ("⛶ 适应", "视图缩放至整页（快捷键 F）", self.canvas.fit_page),
         ]:
@@ -205,30 +267,31 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
     def _build_menu(self) -> None:
-        # ── 文件：打开/导出全家（批量归入文件，不再单开顶级菜单）──
-        open_act = QAction("打开合同…", self)
-        open_act.setShortcut("Ctrl+O")
-        open_act.triggered.connect(self._open_files)
-        batch_act = QAction("批量导出…", self)
-        batch_act.triggered.connect(self._batch_export)
-        export_act = QAction("导出 PDF…", self)
-        export_act.setShortcut("Ctrl+E")
-        export_act.triggered.connect(self._export)
-
+        # ── 文件：打开/追加/关闭/导出 ──
         m_file = self.menuBar().addMenu("文件")
-        m_file.addAction(open_act)
-        m_file.addAction(batch_act)
+        self._add_action(m_file, "打开合同…", self._open_files, "Ctrl+O")
+        self._add_action(m_file, "追加导入文件…", self._append_files, "Ctrl+Shift+O")
+        self._add_action(m_file, "关闭当前文档", self._close_document, "Ctrl+W")
         m_file.addSeparator()
-        m_file.addAction(export_act)
+        self._add_action(m_file, "批量导出…", self._batch_export)
+        self._add_action(m_file, "导出 PDF…", self._export, "Ctrl+E")
+        m_file.addSeparator()
+        self._add_action(m_file, "设置输出目录…", self._choose_output_dir)
+        self.out_dir_act = self._add_action(
+            m_file, "输出目录：与源文件同目录", self._reset_output_dir
+        )
+        self._refresh_output_dir_action()
 
-        # ── 编辑：撤销（紧跟文件，通行顺序）──
-        self.undo_act = QAction("撤销", self)
-        self.undo_act.setShortcut("Ctrl+Z")
-        self.undo_act.triggered.connect(self._undo)
+        # ── 编辑：撤销/重做/重盖 ──
         m_edit = self.menuBar().addMenu("编辑")
-        m_edit.addAction(self.undo_act)
+        self.undo_act = self._add_action(m_edit, "撤销", self._undo, "Ctrl+Z")
+        self.redo_act = self._add_action(m_edit, "重做", self._redo, "Ctrl+Y")
+        self.redo_act.setShortcuts(["Ctrl+Y", "Ctrl+Shift+Z"])
+        m_edit.addSeparator()
+        self._add_action(m_edit, "重盖选中章", self._restamp_selected, "Ctrl+R")
+        self._add_action(m_edit, "删除选中章", self._delete_selected)
 
-        # ── 页面：旋转/页序/校准（与工具栏同源，不再互相缺项）──
+        # ── 页面：旋转/页序/删除/校准 ──
         m_page = self.menuBar().addMenu("页面")
         m_page.addAction("顺时针旋转 90°", lambda: self._rotate_page(-1))
         m_page.addAction("逆时针旋转 90°", lambda: self._rotate_page(1))
@@ -236,50 +299,146 @@ class MainWindow(QMainWindow):
         m_page.addSeparator()
         m_page.addAction("页面上移", lambda: self._move_page(-1))
         m_page.addAction("页面下移", lambda: self._move_page(1))
+        del_act = self._add_action(m_page, "删除选中页", self._delete_pages)
+        # 页列表右键同款删除（ActionsContextMenu 直接复用 QAction）
+        self.page_list.addAction(del_act)
         m_page.addSeparator()
         m_page.addAction("四点纸边校准（点四个角）", self._four_point_calibrate)
-        cal_act = QAction("手动校准（输入尺寸）…", self)
-        cal_act.triggered.connect(self._calibrate)
-        m_page.addAction(cal_act)
+        self._add_action(m_page, "手动校准（输入尺寸）…", self._calibrate)
         m_page.addAction("自动纸边检测（全部页）", self._auto_calibrate)
 
-        # ── 视图：缩放归视图（适应页面从文件菜单迁出）──
+        # ── 插入 ──
+        m_insert = self.menuBar().addMenu("插入")
+        self._add_action(m_insert, "加盖日期…", self._add_date_stamp, "Ctrl+D")
+
+        # ── 视图 ──
         m_view = self.menuBar().addMenu("视图")
-        fit_act = QAction("适应页面", self)
-        fit_act.setShortcut("F")
-        fit_act.triggered.connect(self.canvas.fit_page)
-        m_view.addAction(fit_act)
-        zoom_in = QAction("放大", self)
-        zoom_in.setShortcut("Ctrl+=")
-        zoom_in.triggered.connect(lambda: self.canvas.scale(1.25, 1.25))
-        m_view.addAction(zoom_in)
-        zoom_out = QAction("缩小", self)
-        zoom_out.setShortcut("Ctrl+-")
-        zoom_out.triggered.connect(lambda: self.canvas.scale(0.8, 0.8))
-        m_view.addAction(zoom_out)
+        self._add_action(m_view, "适应页面", self.canvas.fit_page, "F")
+        self._add_action(m_view, "放大", lambda: self.canvas.scale(1.25, 1.25), "Ctrl+=")
+        self._add_action(m_view, "缩小", lambda: self.canvas.scale(0.8, 0.8), "Ctrl+-")
 
         # ── 模板（含动态列表）──
-        tpl_save = QAction("把当前页存为模板…", self)
-        tpl_save.triggered.connect(self._save_template)
         self.tpl_menu = self.menuBar().addMenu("模板")
-        self.tpl_menu.addAction(tpl_save)
+        self._add_action(self.tpl_menu, "把当前页存为模板…", self._save_template)
         self.tpl_menu.addSeparator()
         self.tpl_menu.aboutToShow.connect(self._refresh_template_menu)
 
         # ── 帮助（永远最后）──
-        about_act = QAction("关于…", self)
-        about_act.triggered.connect(self._show_about)
         m_help = self.menuBar().addMenu("帮助")
-        m_help.addAction(about_act)
+        self._add_action(m_help, "关于…", self._show_about)
 
-    # ── 文件打开 ──
+    def _add_action(self, menu, text: str, slot, shortcut: str | None = None) -> QAction:
+        act = QAction(text, self)
+        if shortcut:
+            act.setShortcut(shortcut)
+        act.triggered.connect(slot)
+        menu.addAction(act)
+        return act
+
+    # ── 撤销 / 重做 ──
+
+    def _snapshot(self) -> _Snapshot:
+        pages = list(self.doc.pages) if self.doc is not None else []
+        return _Snapshot(
+            pages=pages,
+            page_state=[
+                (p._override, p.revision, p.phys_w_mm, p.phys_h_mm, p.needs_calibration)
+                for p in pages
+            ],
+            stamps={
+                i: [(r, tuple(getattr(r, f) for f in _RECORD_FIELDS)) for r in recs]
+                for i, recs in self.stamps.items()
+            },
+            current=self.current_page,
+        )
+
+    def _restore(self, snap: _Snapshot) -> None:
+        if self.doc is None:
+            return
+        self.doc.pages = list(snap.pages)
+        for page, (override, revision, w, h, flag) in zip(
+            snap.pages, snap.page_state, strict=True
+        ):
+            page._override = override
+            page.revision = revision  # 缩略图缓存跟着回退，否则撤销后还显示旧图
+            page.phys_w_mm, page.phys_h_mm = w, h
+            page.needs_calibration = flag
+        self.stamps = {}
+        for index, entries in snap.stamps.items():
+            recs = []
+            for rec, values in entries:
+                for field, value in zip(_RECORD_FIELDS, values, strict=True):
+                    setattr(rec, field, value)
+                recs.append(rec)
+            if recs:
+                self.stamps[index] = recs
+        self._rebuild_page_list(select=snap.current)
+
+    @contextmanager
+    def _command(self, label: str):
+        """把一次状态变更包成可撤销/可重做的命令。
+
+        用法：with self._command("盖章"): ...改状态...
+        没打开文档时退化为直通，不压栈。
+        """
+        if self.doc is None:
+            yield
+            return
+        before = self._snapshot()
+        try:
+            yield
+        except Exception:
+            # 全有或全无：动作中途失败就回滚，绝不把半改完的状态留给用户
+            self._restore(before)
+            raise
+        after = self._snapshot()
+        self._undo_stack.append((label, before, after))
+        del self._undo_stack[:-UNDO_LIMIT]
+        self._redo_stack.clear()
+        self._update_history_actions()
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            self.info_label.setText("没有可撤销的操作")
+            return
+        label, before, after = self._undo_stack.pop()
+        self._restore(before)
+        self._redo_stack.append((label, before, after))
+        self._update_history_actions()
+        self.info_label.setText(f"已撤销：{label}")
+
+    def _redo(self) -> None:
+        if not self._redo_stack:
+            self.info_label.setText("没有可重做的操作")
+            return
+        label, before, after = self._redo_stack.pop()
+        self._restore(after)
+        self._undo_stack.append((label, before, after))
+        self._update_history_actions()
+        self.info_label.setText(f"已重做：{label}")
+
+    def _update_history_actions(self) -> None:
+        self.undo_act.setEnabled(bool(self._undo_stack))
+        self.undo_act.setText(
+            f"撤销：{self._undo_stack[-1][0]}" if self._undo_stack else "撤销"
+        )
+        self.redo_act.setEnabled(bool(self._redo_stack))
+        self.redo_act.setText(
+            f"重做：{self._redo_stack[-1][0]}" if self._redo_stack else "重做"
+        )
+
+    def _clear_history(self) -> None:
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._update_history_actions()
+
+    # ── 文件打开与文档管理 ──
+
+    _FILE_FILTER = "合同文件 (*.pdf *.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
 
     def _open_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "打开合同（PDF 或图片，可多选图片）",
-            "",
-            "合同文件 (*.pdf *.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
+            self, "打开合同（PDF 或图片，可多选图片）", "", self._FILE_FILTER
         )
         if not paths:
             return
@@ -288,27 +447,62 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "打开失败", str(e))
 
-    def _load_document(self, paths: list[str]) -> None:
-        if len(paths) == 1 and paths[0].lower().endswith(".pdf"):
-            doc = Document.open(paths[0])
-        else:
-            paths = sorted(paths, key=_natural_key)
-            doc = Document.from_images(paths)
+    def _append_files(self) -> None:
+        """追加导入：把更多文件的页接到当前文档末尾（可撤销）。"""
+        if self.doc is None:
+            self._open_files()
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "追加导入（PDF 或图片，可多选）", "", self._FILE_FILTER
+        )
+        if not paths:
+            return
+        try:
+            extra = self._build_document(paths)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", str(e))
+            return
+        added = len(extra.pages)
+        with self._command(f"追加导入 {added} 页"):
+            self.doc.extend(extra)
+            self._rebuild_page_list(select=len(self.doc.pages) - added)
+        self.info_label.setText(f"已追加 {added} 页，可用「页面 → 删除选中页」移除")
 
+    def _close_document(self) -> None:
+        if self.doc is None:
+            return
+        if QMessageBox.question(
+            self, "关闭文档", "关闭当前文档？未导出的盖章会丢失。"
+        ) != QMessageBox.Yes:
+            return
+        self.doc.close()
+        self.doc = None
+        self.stamps = {}
+        self.current_page = -1
+        self._pending_rec = None
+        self._clear_history()
+        self.page_list.clear()
+        self.canvas.clear_page()
+        self._update_info(None)
+
+    @staticmethod
+    def _build_document(paths: list[str]) -> Document:
+        if len(paths) == 1 and paths[0].lower().endswith(".pdf"):
+            return Document.open(paths[0])
+        if any(p.lower().endswith(".pdf") for p in paths):
+            raise ValueError("PDF 请一次只选一个（图片可以多选）")
+        return Document.from_images(sorted(paths, key=natural_key))
+
+    def _load_document(self, paths: list[str]) -> None:
+        doc = self._build_document(paths)
         if self.doc is not None:
             self.doc.close()  # 释放上一个文档的 PDF 句柄与页面缓存
         self.doc = doc
         self.stamps = {}
         self.current_page = -1
-        self._undo_stack.clear()
-        self.page_list.clear()
-        for i, page in enumerate(doc.pages):
-            # 缩略图走低 DPI 独立渲染，不占用全尺寸 LRU（懒加载配套）
-            thumb = np_rgb_to_qpixmap(_thumbnail(page.thumbnail(), 140))
-            item = QListWidgetItem(thumb, f"第 {i + 1} 页")
-            self.page_list.addItem(item)
-        if doc.pages:
-            self.page_list.setCurrentRow(0)
+        self._pending_rec = None
+        self._clear_history()
+        self._rebuild_page_list(select=0 if doc.pages else -1)
 
         # 比例检测：有页面偏离 A 系纸比例时提示校准（方案 v1.3 §4.3）
         flagged = [i + 1 for i, p in enumerate(doc.pages) if p.needs_calibration]
@@ -323,21 +517,83 @@ class MainWindow(QMainWindow):
             if ret == QMessageBox.Yes:
                 self._calibrate()
 
-    def _magnifier_crop(self, x_mm: float, y_mm: float, half_mm: float = 8.0):
-        """放大镜取景：光标 ±half_mm 的全分辨率画面，越界补边、准线恒在中心。"""
-        if self.doc is None or self.current_page < 0:
-            return None
-        from PySide6.QtGui import QPixmap
+    def _rebuild_page_list(self, select: int = -1) -> None:
+        """按当前 doc.pages 重建页列表并选中指定页。页增删/撤销后统一走这里。"""
+        if self.doc is None:
+            self.page_list.clear()
+            return
+        multi_source = len({p.source_name for p in self.doc.pages if p.source_name}) > 1
+        self.page_list.blockSignals(True)
+        self.page_list.clear()
+        for i, page in enumerate(self.doc.pages):
+            icon = self._page_icon(page)
+            label = f"第 {i + 1} 页"
+            if multi_source and page.source_name:
+                label += f"\n{page.source_name}"
+            self.page_list.addItem(QListWidgetItem(icon, label))
+        self.page_list.blockSignals(False)
+        self.current_page = -1  # 强制重建画布
+        if 0 <= select < len(self.doc.pages):
+            self.page_list.setCurrentRow(select)
+        elif self.doc.pages:
+            self.page_list.setCurrentRow(min(max(select, 0), len(self.doc.pages) - 1))
+        else:
+            self.canvas.clear_page()
 
-        from app.canvas import np_rgb_to_qpixmap
+    def _selected_page_rows(self) -> list[int]:
+        rows = sorted(idx.row() for idx in self.page_list.selectedIndexes())
+        if rows:
+            return rows
+        return [self.current_page] if self.current_page >= 0 else []
+
+    def _delete_pages(self) -> None:
+        """删除页列表里选中的页（可撤销）。多选可一次删掉整个追加进来的文件。"""
+        if self.doc is None:
+            return
+        rows = self._selected_page_rows()
+        if not rows:
+            return
+        if len(rows) >= len(self.doc.pages):
+            QMessageBox.information(
+                self, "提示", "不能删除全部页面。要清空请用「文件 → 关闭当前文档」。"
+            )
+            return
+        names = "、".join(f"第 {r + 1} 页" for r in rows[:5])
+        more = f" 等 {len(rows)} 页" if len(rows) > 5 else ""
+        if QMessageBox.question(self, "删除页面", f"删除 {names}{more}？可用 Ctrl+Z 撤销。") != (
+            QMessageBox.Yes
+        ):
+            return
+        self._sync_canvas_to_records()
+        with self._command(f"删除 {len(rows)} 页"):
+            self.doc.remove_pages(rows)
+            self.stamps = self._reindex_stamps(rows)
+            self._rebuild_page_list(select=min(rows[0], len(self.doc.pages) - 1))
+        self.info_label.setText(f"已删除 {len(rows)} 页")
+
+    def _reindex_stamps(self, removed_rows: list[int]) -> dict[int, list[StampRecord]]:
+        """删页后重建 {页码: 记录} 映射：被删页的记录丢弃，其后各页下标前移。"""
+        doomed = set(removed_rows)
+        out: dict[int, list[StampRecord]] = {}
+        for old_index, recs in self.stamps.items():
+            if old_index in doomed or not recs:
+                continue
+            out[old_index - sum(1 for r in doomed if r < old_index)] = recs
+        return out
+
+    # ── 页面显示 ──
+
+    def _magnifier_crop(self, x_mm: float, y_mm: float):
+        """放大镜取景：光标 ±HALF_WINDOW_MM 的全分辨率画面，越界补边、准线恒在中心。"""
         from app.magnifier import HALF_WINDOW_MM
 
-        half_mm = HALF_WINDOW_MM
+        if self.doc is None or self.current_page < 0:
+            return None
         page = self.doc.pages[self.current_page]
         dpi = page.dpi
-        cx = int(round(x_mm / 25.4 * dpi))
-        cy = int(round(y_mm / 25.4 * dpi))
-        r = int(round(half_mm / 25.4 * dpi))
+        cx = round(x_mm / MM_PER_INCH * dpi)
+        cy = round(y_mm / MM_PER_INCH * dpi)
+        r = round(HALF_WINDOW_MM / MM_PER_INCH * dpi)
         img = page.image
         h, w = img.shape[:2]
         x0, y0 = max(0, cx - r), max(0, cy - r)
@@ -364,62 +620,111 @@ class MainWindow(QMainWindow):
         page = self.doc.pages[row]
         # 放大镜取景源：全分辨率 + 变异感知（旋转/校准后的页面取景同样正确）
         self.canvas.magnifier_source = self._magnifier_crop
-        # 显示像素限制：屏显用 ~150DPI 足够（导出仍走 300DPI 全尺寸）。
-        # 全尺寸 25MB/页的 QPixmap 是翻页卡顿的元凶之一。
-        self.canvas.show_page(
-            _display_image(page.image), page.phys_w_mm, page.phys_h_mm
-        )
+        self.canvas.show_page(display_image(page.image), page.phys_w_mm, page.phys_h_mm)
         for rec in self.stamps.get(row, []):
             self.canvas.add_stamp(self._make_stamp_item(rec))
+
+    def _page_icon(self, page: Page):
+        """页缩略图（低 DPI 独立渲染，不占用全尺寸 LRU）。带缓存：撤销/重做
+        会整表重建页列表，50 页文档每次重渲染是实打实的卡顿。"""
+        key = (page.uid, page.revision)
+        icon = self._thumb_cache.get(key)
+        if icon is None:
+            icon = np_rgb_to_qpixmap(thumbnail(page.thumbnail(), 140))
+            if len(self._thumb_cache) > 400:
+                self._thumb_cache.clear()
+            self._thumb_cache[key] = icon
+        return icon
 
     def _refresh_page_thumbnail(self, row: int) -> None:
         if self.doc is None:
             return
         item = self.page_list.item(row)
         if item:
-            item.setIcon(np_rgb_to_qpixmap(_thumbnail(self.doc.pages[row].thumbnail(), 140)))
+            item.setIcon(self._page_icon(self.doc.pages[row]))
 
     # ── 盖章交互 ──
 
-    def _add_stamp(self, seal: Seal) -> None:
-        """盖章：印章跟随鼠标，在页面上点哪盖哪（修改意见）。"""
+    def _require_document(self) -> bool:
         if self.doc is None or self.current_page < 0:
             QMessageBox.information(self, "提示", "请先打开合同文件")
+            return False
+        return True
+
+    def _add_stamp(self, seal: Seal) -> None:
+        """盖章：印章跟随鼠标，在页面上点哪盖哪（修改意见）。"""
+        if not self._require_document():
             return
         # 落章即采样随机效果，预览立即所见即所得
         processed, applied = self._session_rng.apply_auto(
             seal.image, self.panel.random_spec()
         )
-        self._pending_rec = StampRecord(
-            seal=seal,
-            center_x_mm=0.0,
-            center_y_mm=0.0,
-            size_mm=seal.phys_mm,
-            applied=applied,
-            processed=processed,
+        self._start_placement(
+            StampRecord(
+                seal=seal,
+                center_x_mm=0.0,
+                center_y_mm=0.0,
+                size_mm=seal.phys_mm,
+                applied=applied,
+                processed=processed,
+            ),
+            f"「{seal.name}」跟随鼠标中——在页面上点击落位，Esc 取消",
         )
-        self.canvas.start_follow(processed, seal.phys_mm)
-        self.info_label.setText(f"「{seal.name}」跟随鼠标中——在页面上点击落位，Esc 取消")
+
+    def _add_date_stamp(self) -> None:
+        """加盖日期：默认系统当天，可改日期/格式/字高，之后点哪盖哪。"""
+        if not self._require_document():
+            return
+        dlg = DateStampDialog(
+            self, date.today(), self.settings.date_format, self.settings.date_height_mm
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        text, fmt, height_mm = dlg.values()
+        page = self.doc.pages[self.current_page]
+        try:
+            ink = render_date_ink(text, height_mm, page.dpi)
+        except ValueError as e:
+            QMessageBox.warning(self, "日期渲染失败", str(e))
+            return
+        self.settings.date_format = fmt
+        self.settings.date_height_mm = height_mm
+        self._save_settings()
+
+        # 日期不加随机手感：打印/书写的日期没有印泥深浅，加蒙尘反而假
+        seal = Seal(name=text, kind=KIND_DATE, image=ink, phys_mm=ink_width_mm(ink, height_mm))
+        self._start_placement(
+            StampRecord(
+                seal=seal,
+                center_x_mm=0.0,
+                center_y_mm=0.0,
+                size_mm=seal.phys_mm,
+                processed=ink,
+            ),
+            f"日期「{text}」跟随鼠标中——在页面上点击落位，Esc 取消",
+        )
+
+    def _start_placement(self, rec: StampRecord, hint: str) -> None:
+        self._pending_rec = rec
+        self.canvas.start_follow(rec.processed, rec.size_mm)
+        self.info_label.setText(hint)
 
     def _on_stamp_placed(self, x_mm: float, y_mm: float) -> None:
-        rec = getattr(self, "_pending_rec", None)
+        rec = self._pending_rec
         if rec is None:
             self.canvas.cancel_follow()
             return
         rec.center_x_mm = x_mm
         rec.center_y_mm = y_mm
         self.canvas.cancel_follow()
-        page_idx = self.current_page
-        self.stamps.setdefault(page_idx, []).append(rec)
-        item = self._make_stamp_item(rec)
-        self.canvas.add_stamp(item)
-        self.canvas.centerOn(item)
         self._pending_rec = None
+        page_idx = self.current_page
+        with self._command(f"盖章「{rec.seal.name}」"):
+            self.stamps.setdefault(page_idx, []).append(rec)
+            item = self._make_stamp_item(rec)
+            self.canvas.add_stamp(item)
+            self.canvas.centerOn(item)
         self._update_info(rec)
-        self._push_undo(
-            f"盖章「{rec.seal.name}」",
-            lambda r=rec, p=page_idx: self._remove_record(r, p),
-        )
 
     def _on_follow_cancelled(self) -> None:
         self._pending_rec = None
@@ -430,23 +735,50 @@ class MainWindow(QMainWindow):
         rec = self._find_record(item)
         if rec is None:
             return
-        old_xy = (rec.center_x_mm, rec.center_y_mm)
-        rec.center_x_mm = x_mm
-        rec.center_y_mm = y_mm
-        item.set_center(x_mm, y_mm)
+        with self._command("移动章"):
+            rec.center_x_mm = x_mm
+            rec.center_y_mm = y_mm
+            item.set_center(x_mm, y_mm)
         self._update_info(rec)
         self._sync_adjust_spins(rec)
-        self._push_undo(
-            "移动章",
-            lambda r=rec, it=item, xy=old_xy: (
-                setattr(r, "center_x_mm", xy[0]),
-                setattr(r, "center_y_mm", xy[1]),
-                it.set_center(*xy),
-            ),
-        )
 
     def _on_place_rejected(self) -> None:
         self.info_label.setText("请点击页面范围内落章（章整个飞出纸面会被忽略）")
+
+    def _restamp_selected(self) -> None:
+        """重盖：撤掉选中的章，换一次手感重新点位置盖（骑缝切片不适用）。"""
+        rec = self._selected_record()
+        if rec is None:
+            self.info_label.setText("先点击选中一个章，再点重盖")
+            return
+        if rec.locked:
+            QMessageBox.information(
+                self, "提示", "骑缝切片不能单独重盖。请删除整组后重新开骑缝章对话框。"
+            )
+            return
+        page_idx = self.current_page
+        size_mm, rotation, opacity = rec.size_mm, rec.rotation_deg, rec.opacity
+        with self._command(f"重盖「{rec.seal.name}」"):
+            self.stamps[page_idx] = [r for r in self.stamps.get(page_idx, []) if r is not rec]
+            self._on_page_changed(page_idx, resync=False)
+        processed, applied = self._session_rng.apply_auto(
+            rec.seal.image, self.panel.random_spec()
+        )
+        self._start_placement(
+            StampRecord(
+                seal=rec.seal,
+                center_x_mm=0.0,
+                center_y_mm=0.0,
+                size_mm=size_mm,
+                rotation_deg=rotation,
+                opacity=opacity,
+                applied=applied,
+                processed=processed,
+            ),
+            f"重盖「{rec.seal.name}」：点击新位置落位，Esc 取消（Ctrl+Z 可退回原来那枚）",
+        )
+
+    # ── 骑缝章 ──
 
     def _add_perforation(self, seal: Seal) -> None:
         """骑缝章：对话框 → 拼合预览确认 → 切片作为 locked 记录落到各页。"""
@@ -455,9 +787,9 @@ class MainWindow(QMainWindow):
             return
         seed = secrets.randbelow(2**31 - 1)
         # 印章先过一遍全局随机效果（角度/色度/蒙尘），再切割
-        rng = Randomizer(seed)
-        processed_seal, _applied = rng.apply_auto(seal.image, self.panel.random_spec())
-
+        processed_seal, _applied = Randomizer(seed).apply_auto(
+            seal.image, self.panel.random_spec()
+        )
         dlg = PerforationDialog(
             self, self.doc.pages, processed_seal, seal.name, seal.phys_mm, seed
         )
@@ -465,40 +797,15 @@ class MainWindow(QMainWindow):
             return
 
         group = f"perf_{seed}"
-        touched_pages = set()
-        group_records: list[tuple[int, StampRecord]] = []
-        for pl in dlg.placements:
-            page = self.doc.pages[pl.page_index]
-            h_px, w_px = pl.slice_rgba.shape[:2]
-            w_mm = w_px / page.dpi * 25.4
-            h_mm = h_px / page.dpi * 25.4
-            rec = StampRecord(
-                seal=seal,
-                center_x_mm=pl.right_edge_mm - w_mm / 2,
-                center_y_mm=pl.top_mm + h_mm / 2,
-                size_mm=w_mm,
-                rotation_deg=0.0,
-                opacity=1.0,
-                applied=None,
-                processed=pl.slice_rgba,
-                locked=True,
-                group=group,
+        with self._command("应用骑缝章"):
+            touched_pages = self._append_perforation_records(seal, dlg.placements, group)
+            target = (
+                self.current_page if self.current_page in touched_pages else min(touched_pages)
             )
-            self.stamps.setdefault(pl.page_index, []).append(rec)
-            group_records.append((pl.page_index, rec))
-            touched_pages.add(pl.page_index)
-        self._push_undo(
-            "应用骑缝章",
-            lambda recs=group_records: [self._remove_record(r, p) for p, r in recs],
-        )
-        # 当前页不在骑缝范围内时，跳到第一个受影响的页，否则用户看不到任何变化
-        target_page = self.current_page if self.current_page in touched_pages else min(touched_pages)
-        self.page_list.setCurrentRow(target_page)
-        # 刷新当前页显示
-        self._on_page_changed(self.current_page)
+            self.page_list.setCurrentRow(target)
+            self._on_page_changed(self.current_page)
         # 定位到第一个切片并放大，让细条带直接可见（骑缝可见性）
-        first_page = min(touched_pages)
-        if first_page == self.current_page:
+        if min(touched_pages) == self.current_page:
             for item in self.canvas.stamps():
                 rec = self._find_record(item)
                 if rec is not None and rec.locked:
@@ -509,6 +816,48 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "骑缝章已应用", f"已在 {len(touched_pages)} 页放置切片（组 {group}）。"
         )
+
+    def _append_perforation_records(
+        self, seal: Seal, placements: list[SlicePlacement], group: str
+    ) -> set[int]:
+        """把切片放置结果转成 locked 记录挂到各页。返回受影响的页码集合。"""
+        touched: set[int] = set()
+        for pl in placements:
+            page = self.doc.pages[pl.page_index]
+            h_px, w_px = pl.slice_rgba.shape[:2]
+            w_mm = w_px / page.dpi * MM_PER_INCH
+            h_mm = h_px / page.dpi * MM_PER_INCH
+            self.stamps.setdefault(pl.page_index, []).append(
+                StampRecord(
+                    seal=seal,
+                    center_x_mm=pl.right_edge_mm - w_mm / 2,
+                    center_y_mm=pl.top_mm + h_mm / 2,
+                    size_mm=w_mm,
+                    processed=pl.slice_rgba,
+                    locked=True,
+                    group=group,
+                )
+            )
+            touched.add(pl.page_index)
+        return touched
+
+    def _apply_perforation_records(
+        self, seal: Seal, seed: int, page_indices: list[int] | None = None
+    ) -> int:
+        """不弹对话框的骑缝章应用（批量导出用）。返回切片数。"""
+        processed_seal, _ = Randomizer(seed).apply_auto(seal.image, self.panel.random_spec())
+        if page_indices is None:
+            page_indices = list(range(len(self.doc.pages)))
+        try:
+            placements = plan_perforation(
+                processed_seal, self.doc.pages, page_indices, PerforationSpec(seed=seed)
+            )
+        except ValueError as e:
+            raise ValueError(f"骑缝章：{e}") from e
+        self._append_perforation_records(seal, placements, f"perf_{seed}")
+        return len(placements)
+
+    # ── 记录与画布同步 ──
 
     def _make_stamp_item(self, rec: StampRecord) -> StampItem:
         rgba = rec.processed if rec.processed is not None else rec.seal.image
@@ -566,11 +915,13 @@ class MainWindow(QMainWindow):
         if rec is None:
             self.info_label.setText("选中印章后，在页面空白处单击即可移动章到点击处")
             return
-        kind = "⌀" if rec.seal.kind == KIND_SEAL else "宽"
+        size_text = (
+            f"⌀{rec.size_mm:.1f}mm" if rec.seal.kind == KIND_SEAL else f"宽{rec.size_mm:.1f}mm"
+        )
         lock = "（骑缝切片）" if rec.locked else ""
         self.info_label.setText(
             f"{rec.seal.name}{lock}：中心 ({rec.center_x_mm:.1f}, {rec.center_y_mm:.1f}) mm，"
-            f"{kind}{rec.size_mm:.1f}mm，旋转 {rec.rotation_deg:.1f}°"
+            f"{size_text}，旋转 {rec.rotation_deg:.1f}°"
         )
 
     def _sync_canvas_to_records(self) -> None:
@@ -593,19 +944,18 @@ class MainWindow(QMainWindow):
         """显式删除：只处理用户在画布上按 Delete 移除的章。"""
         page_idx = self.current_page
         doomed = {it.data(0) for it in items}
-        removed = [r for r in self.stamps.get(page_idx, []) if id(r) in doomed]
-        self.stamps[page_idx] = [
-            r for r in self.stamps.get(page_idx, []) if id(r) not in doomed
-        ]
-        if removed:
-            def restore(recs=removed, p=page_idx):
-                self.stamps.setdefault(p, []).extend(recs)
-
-            self._push_undo(f"删除 {len(removed)} 枚章", restore)
+        current = self.stamps.get(page_idx, [])
+        removed = [r for r in current if id(r) in doomed]
+        if not removed:
+            return
+        with self._command(f"删除 {len(removed)} 枚章"):
+            self.stamps[page_idx] = [r for r in current if id(r) not in doomed]
         self.info_label.setText("已删除")
 
+    # ── 页面操作 ──
+
     def _move_page(self, delta: int) -> None:
-        """页序调整：当前页上移/下移一位，盖章记录随页面走（修改意见 #1）。"""
+        """页序调整：当前页上移/下移一位，盖章记录随页面走。"""
         if self.doc is None or self.current_page < 0:
             return
         old = self.current_page
@@ -613,17 +963,17 @@ class MainWindow(QMainWindow):
         if new < 0 or new >= len(self.doc.pages):
             return
         self._sync_canvas_to_records()
-        # 交换页面与各自的盖章记录
-        self.doc.pages[old], self.doc.pages[new] = self.doc.pages[new], self.doc.pages[old]
-        self.stamps[old], self.stamps[new] = self.stamps.get(old, []), self.stamps.get(new, [])
-        self.stamps = {k: v for k, v in self.stamps.items() if v}
-        self.current_page = -1  # 强制重建画布
-        self.page_list.setCurrentRow(new)
-        # 两个位置的缩略图都要刷新
-        self._refresh_page_thumbnail(old)
-        self._refresh_page_thumbnail(new)
-
-    # ── 页面操作（M3）──
+        with self._command("调整页序"):
+            self.doc.pages[old], self.doc.pages[new] = (
+                self.doc.pages[new],
+                self.doc.pages[old],
+            )
+            self.stamps[old], self.stamps[new] = (
+                self.stamps.get(new, []),
+                self.stamps.get(old, []),
+            )
+            self.stamps = {k: v for k, v in self.stamps.items() if v}
+            self._rebuild_page_list(select=new)
 
     def _rotate_page(self, k: int) -> None:
         """旋转当前页图像与物理尺寸，印章坐标联动。
@@ -632,35 +982,31 @@ class MainWindow(QMainWindow):
         """
         if self.doc is None or self.current_page < 0:
             return
-        page = self.doc.pages[self.current_page]
-        old_w, old_h = page.phys_w_mm, page.phys_h_mm
-        page.image = np.ascontiguousarray(np.rot90(page.image, k))
-        k_mod = k % 4
-        if k_mod in (1, 3):
-            page.phys_w_mm, page.phys_h_mm = old_h, old_w
-        # 印章坐标联动（mm 坐标系旋转）
-        for rec in self.stamps.get(self.current_page, []):
-            x, y = rec.center_x_mm, rec.center_y_mm
-            if k_mod == 1:      # 逆时针 90
-                rec.center_x_mm, rec.center_y_mm = y, old_w - x
-                rec.rotation_deg -= 90
-            elif k_mod == 3:    # 顺时针 90
-                rec.center_x_mm, rec.center_y_mm = old_h - y, x
-                rec.rotation_deg += 90
-            else:               # 180
-                rec.center_x_mm, rec.center_y_mm = old_w - x, old_h - y
-                rec.rotation_deg += 180
-            rec.rotation_deg = (rec.rotation_deg + 180) % 360 - 180
-        # 撤销：反向旋转一次（k 取反，坐标映射随之互逆）
-        k_mod = k % 4
-        k_inv = (4 - k_mod) % 4
-        if k_inv != 0:
-            self._push_undo("旋转页面", lambda kk=k_inv: self._rotate_page(kk))
-        self._on_page_changed(self.current_page)
-        self._refresh_page_thumbnail(self.current_page)  # 变异后刷新缩略图
+        with self._command("旋转页面"):
+            page = self.doc.pages[self.current_page]
+            old_w, old_h = page.phys_w_mm, page.phys_h_mm
+            page.image = np.ascontiguousarray(np.rot90(page.image, k))
+            k_mod = k % 4
+            if k_mod in (1, 3):
+                page.phys_w_mm, page.phys_h_mm = old_h, old_w
+            # 印章坐标联动（mm 坐标系旋转）
+            for rec in self.stamps.get(self.current_page, []):
+                x, y = rec.center_x_mm, rec.center_y_mm
+                if k_mod == 1:      # 逆时针 90
+                    rec.center_x_mm, rec.center_y_mm = y, old_w - x
+                    rec.rotation_deg -= 90
+                elif k_mod == 3:    # 顺时针 90
+                    rec.center_x_mm, rec.center_y_mm = old_h - y, x
+                    rec.rotation_deg += 90
+                else:               # 180
+                    rec.center_x_mm, rec.center_y_mm = old_w - x, old_h - y
+                    rec.rotation_deg += 180
+                rec.rotation_deg = (rec.rotation_deg + 180) % 360 - 180
+            self._on_page_changed(self.current_page, resync=False)
+            self._refresh_page_thumbnail(self.current_page)
 
     def _four_point_calibrate(self) -> None:
-        """四点纸边校准：用户在页面上点纸面四个角点（修改意见）。
+        """四点纸边校准：用户在页面上点纸面四个角点。
 
         扫描件自带白边 → 页面边界 ≠ 纸张边界。点完四个顶点后按透视变换
         把页面拉伸裁正为标准 A4，白边消失、物理尺寸精确。
@@ -675,128 +1021,79 @@ class MainWindow(QMainWindow):
 
     def _on_points_picked(self, pts_mm: list) -> None:
         page = self.doc.pages[self.current_page]
-        old_w_mm, old_h_mm = page.phys_w_mm, page.phys_h_mm
         old_dpi = page.dpi
         # 场景 mm → 页面像素
         quad_px = np.array(
-            [[x / 25.4 * old_dpi, y / 25.4 * old_dpi] for x, y in pts_mm],
+            [[x / MM_PER_INCH * old_dpi, y / MM_PER_INCH * old_dpi] for x, y in pts_mm],
             dtype=np.float32,
         )
         # 先在副本上试变换，用户确认后再应用
-        from core.autocal import map_points_through, warp_to_a4
-
-        trial = Page(image=page.image, phys_w_mm=old_w_mm, phys_h_mm=old_h_mm)
-        H = warp_to_a4(trial, quad_px)
-        if H is None:
+        trial = Page(image=page.image, phys_w_mm=page.phys_w_mm, phys_h_mm=page.phys_h_mm)
+        homography = warp_to_a4(trial, quad_px)
+        if homography is None:
             QMessageBox.warning(
                 self, "四点无效",
                 "四个点围成的区域太小（可能点挤在一起或几乎共线），请重新点取纸面四角。",
             )
             self.canvas.cancel_pick()
             return
-        # 预览确认
-        dlg = _WarpPreviewDialog(self, trial.image)
-        if dlg.exec() != QDialog.Accepted:
+        if WarpPreviewDialog(self, trial.image).exec() != QDialog.Accepted:
             self.canvas.cancel_pick()
             self._on_page_changed(self.current_page)
             return
-        # 应用：页面图像与物理尺寸已被 trial 变换，转移回正式 page
-        # 已盖章坐标映射：旧 mm → 旧像素 →(H)→ 新像素 → 新 mm
-        old_image = page.image  # 引用旧数组（懒加载下可能触发一次渲染，可接受）
-        old_w, old_h = page.phys_w_mm, page.phys_h_mm
-        old_flag = page.needs_calibration
-        old_stamp_xy = {id(r): (r.center_x_mm, r.center_y_mm) for r in recs}
-        new_dpi = trial.dpi
-        recs = self.stamps.get(self.current_page, [])
-        if recs:
-            old_pts = np.array(
-                [[r.center_x_mm / 25.4 * old_dpi, r.center_y_mm / 25.4 * old_dpi] for r in recs],
-                dtype=np.float32,
-            )
-            new_pts = map_points_through(H, old_pts)
-            for r, (nx, ny) in zip(recs, new_pts):
-                r.center_x_mm = float(nx) / new_dpi * 25.4
-                r.center_y_mm = float(ny) / new_dpi * 25.4
-        page.image = trial.image
-        page.phys_w_mm, page.phys_h_mm = trial.phys_w_mm, trial.phys_h_mm
-        page.needs_calibration = False
 
-        def restore_cal(p=page, img=old_image, w=old_w, h=old_h,
-                        xy=old_stamp_xy, idx=self.current_page, flag=old_flag):
-            p.image = img
-            p.phys_w_mm, p.phys_h_mm = w, h
-            p.needs_calibration = flag
-            for r in self.stamps.get(idx, []):
-                if id(r) in xy:
-                    r.center_x_mm, r.center_y_mm = xy[id(r)]
-
-        self._push_undo("四点纸边校准", restore_cal)
-        self.canvas.cancel_pick()
-        self._on_page_changed(self.current_page)
-        self._refresh_page_thumbnail(self.current_page)  # 变异后刷新缩略图
+        with self._command("四点纸边校准"):
+            # 已盖章坐标映射：旧 mm → 旧像素 →(H)→ 新像素 → 新 mm
+            recs = self.stamps.get(self.current_page, [])
+            new_dpi = trial.dpi
+            if recs:
+                old_pts = np.array(
+                    [
+                        [r.center_x_mm / MM_PER_INCH * old_dpi,
+                         r.center_y_mm / MM_PER_INCH * old_dpi]
+                        for r in recs
+                    ],
+                    dtype=np.float32,
+                )
+                for r, (nx, ny) in zip(recs, map_points_through(homography, old_pts), strict=True):
+                    r.center_x_mm = float(nx) / new_dpi * MM_PER_INCH
+                    r.center_y_mm = float(ny) / new_dpi * MM_PER_INCH
+            page.image = trial.image
+            page.phys_w_mm, page.phys_h_mm = trial.phys_w_mm, trial.phys_h_mm
+            page.needs_calibration = False
+            self.canvas.cancel_pick()
+            self._on_page_changed(self.current_page, resync=False)
+            self._refresh_page_thumbnail(self.current_page)
         self.info_label.setText("四点校准完成：页面已拉伸为标准 A4（210×297mm）")
 
     def _calibrate(self) -> None:
         if self.doc is None:
             return
         page = self.doc.pages[max(self.current_page, 0)]
-        dlg = _CalibrateDialog(self, page.phys_w_mm, page.phys_h_mm)
+        dlg = CalibrateDialog(self, page.phys_w_mm, page.phys_h_mm)
         if dlg.exec() != QDialog.Accepted:
             return
         w_mm, h_mm, apply_all = dlg.values()
-        targets = self.doc.pages if apply_all else [page]
-        for p in targets:
-            calibrate_paper_edge(p, w_mm, h_mm)
-        self._on_page_changed(self.current_page)
+        with self._command("纸边校准"):
+            for p in self.doc.pages if apply_all else [page]:
+                calibrate_paper_edge(p, w_mm, h_mm)
+            self._on_page_changed(self.current_page, resync=False)
 
     def _auto_calibrate(self) -> None:
         if self.doc is None:
             return
         ok, fail = 0, []
-        for i, page in enumerate(self.doc.pages):
-            if auto_calibrate_page(page):
-                ok += 1
-            else:
-                fail.append(i + 1)
-        self._on_page_changed(self.current_page)
+        with self._command("自动纸边检测"):
+            for i, page in enumerate(self.doc.pages):
+                if auto_calibrate_page(page):
+                    ok += 1
+                else:
+                    fail.append(i + 1)
+            self._on_page_changed(self.current_page, resync=False)
         msg = f"{ok} 页检测并校正成功。"
         if fail:
             msg += f"\n第 {fail} 页未检测到纸边，请改用手动校准。"
         QMessageBox.information(self, "自动纸边检测", msg)
-
-    # ── 撤销（P1）──
-
-    def _push_undo(self, label: str, fn) -> None:
-        """记录逆操作。栈上限 50，防止内存无限增长。"""
-        self._undo_stack.append((label, fn))
-        if len(self._undo_stack) > 50:
-            self._undo_stack.pop(0)
-
-    def _undo(self) -> None:
-        if not self._undo_stack:
-            self.info_label.setText("没有可撤销的操作")
-            return
-        label, fn = self._undo_stack.pop()
-        self._syncing = True  # 撤销期间禁止面板信号反写
-        try:
-            fn()
-        finally:
-            self._syncing = False
-        # 撤销只改了记录；画布贴图还是旧状态——必须跳过"画布→记录"回同步，
-        # 直接重建画布（否则旧贴图位置会把刚撤销的记录又覆盖回去）
-        self._on_page_changed(self.current_page, resync=False)
-        self.info_label.setText(f"已撤销：{label}")
-
-    def _remove_record(self, rec: StampRecord, page_idx: int) -> None:
-        """撤销辅助：从记录表移除一枚章（含当前页画布贴图）。"""
-        recs = self.stamps.get(page_idx, [])
-        if rec := next((r for r in recs if id(r) == id(rec)), None):
-            recs.remove(rec)
-        if page_idx == self.current_page:
-            for item in self.canvas.stamps():
-                if item.data(0) == id(rec):
-                    self.canvas._scene.removeItem(item)
-                    break
 
     # ── 删除与骑缝组管理 ──
 
@@ -823,7 +1120,6 @@ class MainWindow(QMainWindow):
             self.info_label.setText("先点击选中一个章，再删除")
             return
         self.canvas.remove_selected_stamp()  # 内部发 stamps_deleted → 记录同步移除
-        self.info_label.setText("已删除")
 
     def _delete_group(self) -> None:
         """删除整组骑缝章（跨所有页）。"""
@@ -831,24 +1127,15 @@ class MainWindow(QMainWindow):
         if rec is None or not rec.locked or not rec.group:
             return
         gid = rec.group
-        removed_by_page: dict[int, list[StampRecord]] = {}
-        for page_idx in list(self.stamps.keys()):
-            keep, gone = [], []
-            for r in self.stamps[page_idx]:
-                (gone if r.group == gid else keep).append(r)
-            if gone:
-                removed_by_page[page_idx] = gone
-            self.stamps[page_idx] = keep
-        self.stamps = {k: v for k, v in self.stamps.items() if v}
-        n = sum(len(v) for v in removed_by_page.values())
-
-        def restore(by_page=removed_by_page):
-            for p, recs in by_page.items():
-                self.stamps.setdefault(p, []).extend(recs)
-
-        self._push_undo(f"删除整组骑缝章（{n} 切片）", restore)
-        self._on_page_changed(self.current_page)  # 重建画布，清掉切片贴图
-        self.info_label.setText(f"已删除整组骑缝章（{n} 个切片）")
+        count = sum(1 for recs in self.stamps.values() for r in recs if r.group == gid)
+        with self._command(f"删除整组骑缝章（{count} 切片）"):
+            self.stamps = {
+                page_idx: [r for r in recs if r.group != gid]
+                for page_idx, recs in self.stamps.items()
+            }
+            self.stamps = {k: v for k, v in self.stamps.items() if v}
+            self._on_page_changed(self.current_page, resync=False)
+        self.info_label.setText(f"已删除整组骑缝章（{count} 个切片）")
 
     def _apply_group_shift(self) -> None:
         """骑缝组竖向整体微调：所有切片统一下移/上移，保留逐页抖动差。"""
@@ -859,57 +1146,53 @@ class MainWindow(QMainWindow):
         if abs(delta) < 1e-9:
             return
         gid = rec.group
-        for records in self.stamps.values():
-            for r in records:
-                if r.group == gid:
-                    r.center_y_mm += delta
-        self._push_undo(
-            f"骑缝组竖向移动 {delta:+.1f}mm",
-            lambda g=gid, d=delta: [
-                setattr(r, "center_y_mm", r.center_y_mm - d)
-                for recs in self.stamps.values() for r in recs if r.group == g
-            ],
-        )
-        # 先让当前页画布贴图跟上记录，再刷新——否则 _on_page_changed 的
-        # 位置回同步会把当前页的记录改回贴图旧位置（记录在贴图之前更新会被覆盖）
-        for item in self.canvas.stamps():
-            r2 = self._find_record(item)
-            if r2 is not None and r2.group == gid:
-                item.set_center(r2.center_x_mm, r2.center_y_mm)
+        with self._command(f"骑缝组竖向移动 {delta:+.1f}mm"):
+            for records in self.stamps.values():
+                for r in records:
+                    if r.group == gid:
+                        r.center_y_mm += delta
+            # 先让当前页画布贴图跟上记录，再刷新——否则 _on_page_changed 的
+            # 位置回同步会把当前页的记录改回贴图旧位置
+            for item in self.canvas.stamps():
+                r2 = self._find_record(item)
+                if r2 is not None and r2.group == gid:
+                    item.set_center(r2.center_x_mm, r2.center_y_mm)
+            self._on_page_changed(self.current_page)
         self.group_shift_spin.setValue(0.0)
-        self._on_page_changed(self.current_page)
         self.info_label.setText(f"整组骑缝章已竖向移动 {delta:+.1f}mm（逐页抖动保持）")
 
-    # ── 模板（M3）──
+    # ── 随机手感与模板 ──
 
     def _reroll_random(self) -> None:
-        """「换一批手感」：重摇所有普通章/签名的随机效果（骑缝切片除外）。
+        """「换一批手感」：重摇所有普通章/签名的随机效果（骑缝切片与日期除外）。
 
         骑缝切片是一整枚章切出来的，参数未保留，无法重摇——
-        需要换手感请重新打开骑缝章对话框。
+        需要换手感请重新打开骑缝章对话框。日期戳本来就不加随机。
         """
-        count = 0
         rng = Randomizer(secrets.randbelow(2**31 - 1))
         spec = self.panel.random_spec()
-        for page_idx, records in self.stamps.items():
-            for rec in records:
-                if rec.locked:
-                    continue
-                rec.processed, rec.applied = rng.apply_auto(rec.seal.image, spec)
-                count += 1
-        # 刷新当前页画布上的贴图
-        for item in self.canvas.stamps():
-            rec = self._find_record(item)
-            if rec is not None and not rec.locked and rec.processed is not None:
-                item.set_pixmap_rgba(rec.processed)
-        self.info_label.setText(f"已为 {count} 枚章/签名更换手感（骑缝切片不受影响）")
+        count = 0
+        with self._command("换一批手感"):
+            for records in self.stamps.values():
+                for rec in records:
+                    if rec.locked or rec.seal.kind == KIND_DATE:
+                        continue
+                    rec.processed, rec.applied = rng.apply_auto(rec.seal.image, spec)
+                    count += 1
+            # 刷新当前页画布上的贴图
+            for item in self.canvas.stamps():
+                rec = self._find_record(item)
+                if rec is not None and not rec.locked and rec.processed is not None:
+                    item.set_pixmap_rgba(rec.processed)
+        self.info_label.setText(f"已为 {count} 枚章/签名更换手感（骑缝切片与日期不受影响）")
 
     def _save_template(self) -> None:
         if self.doc is None or self.current_page < 0:
             return
         self._sync_canvas_to_records()
-        records = self.stamps.get(self.current_page, [])
         page = self.doc.pages[self.current_page]
+        # 日期戳不入模板：它的"印章"是临时合成的，不在库里，套用时必然落空
+        records = [r for r in self.stamps.get(self.current_page, []) if r.seal.kind != KIND_DATE]
         entries = [
             {
                 "seal_name": r.seal.name,
@@ -932,48 +1215,55 @@ class MainWindow(QMainWindow):
 
     def _refresh_template_menu(self) -> None:
         # 保留前两个固定项，重建模板列表
-        actions = self.tpl_menu.actions()
-        for a in actions[2:]:
-            self.tpl_menu.removeAction(a)
+        for act in self.tpl_menu.actions()[2:]:
+            self.tpl_menu.removeAction(act)
         for path in list_templates(default_template_dir()):
             act = QAction(path.stem, self)
-            act.triggered.connect(lambda checked=False, p=path: self._apply_template(p))
+            act.triggered.connect(lambda checked=False, p=path: self._apply_template_action(p))
             self.tpl_menu.addAction(act)
 
+    def _apply_template_action(self, path: Path) -> None:
+        with self._command(f"套用模板「{path.stem}」"):
+            count = self._apply_template(path)
+            if count:
+                self._on_page_changed(self.current_page)
+        if count == 0:
+            QMessageBox.information(self, "提示", "模板中的印章都不在库中，没有可套用的章。")
+
     def _apply_template(self, path: Path, target_page: int | None = None) -> int:
-        """把模板套用到目标页（默认当前页）。返回套用的章数。"""
+        """把模板套用到目标页（默认当前页）。返回套用的章数，不负责刷新画布。"""
         if self.doc is None:
             return 0
         page_idx = self.current_page if target_page is None else target_page
         if page_idx < 0:
             return 0
         page = self.doc.pages[page_idx]
-        entries = load_template(path)
         seals_by_name = self._library_seals_by_name()
         count = 0
-        for e in entries:
+        for e in load_template(path):
             seal = seals_by_name.get(e["seal_name"])
             if seal is None:
                 continue
-            rec = StampRecord(
-                seal=seal,
-                center_x_mm=e["rel_x"] * page.phys_w_mm,
-                center_y_mm=e["rel_y"] * page.phys_h_mm,
-                size_mm=e["size_mm"],
-                rotation_deg=e.get("rotation_deg", 0.0),
-                opacity=e.get("opacity", 1.0),
-            )
-            rec.processed, rec.applied = self._session_rng.apply_auto(
+            processed, applied = self._session_rng.apply_auto(
                 seal.image, self.panel.random_spec()
             )
-            self.stamps.setdefault(page_idx, []).append(rec)
+            self.stamps.setdefault(page_idx, []).append(
+                StampRecord(
+                    seal=seal,
+                    center_x_mm=e["rel_x"] * page.phys_w_mm,
+                    center_y_mm=e["rel_y"] * page.phys_h_mm,
+                    size_mm=e["size_mm"],
+                    rotation_deg=e.get("rotation_deg", 0.0),
+                    opacity=e.get("opacity", 1.0),
+                    applied=applied,
+                    processed=processed,
+                )
+            )
             count += 1
-        if target_page is None and count:
-            self._on_page_changed(self.current_page)
         return count
 
     def _library_seals_by_name(self) -> dict[str, Seal]:
-        out = {}
+        out: dict[str, Seal] = {}
         for png in list_library(default_library_dir()):
             try:
                 seal = Seal.load(png)
@@ -982,98 +1272,47 @@ class MainWindow(QMainWindow):
             out[seal.name] = seal
         return out
 
-    # ── 批量导出（M3）──
+    # ── 输出目录设置 ──
 
-    def _apply_perforation_records(self, seal: Seal, seed: int, page_indices: list[int] | None = None) -> int:
-        """不弹对话框的骑缝章应用（批量导出用）。返回切片数。"""
-        rng = Randomizer(seed)
-        processed_seal, _ = rng.apply_auto(seal.image, self.panel.random_spec())
-        if page_indices is None:
-            page_indices = list(range(len(self.doc.pages)))
+    def _save_settings(self) -> None:
         try:
-            pls = plan_perforation(processed_seal, self.doc.pages, page_indices, PerforationSpec(seed=seed))
-        except ValueError as e:
-            raise ValueError(f"骑缝章：{e}")
-        group = f"perf_{seed}"
-        for pl in pls:
-            page = self.doc.pages[pl.page_index]
-            h_px, w_px = pl.slice_rgba.shape[:2]
-            w_mm = w_px / page.dpi * 25.4
-            h_mm = h_px / page.dpi * 25.4
-            self.stamps.setdefault(pl.page_index, []).append(
-                StampRecord(
-                    seal=seal,
-                    center_x_mm=pl.right_edge_mm - w_mm / 2,
-                    center_y_mm=pl.top_mm + h_mm / 2,
-                    size_mm=w_mm,
-                    processed=pl.slice_rgba,
-                    locked=True,
-                    group=group,
-                )
-            )
-        return len(pls)
+            self.settings.save()
+        except OSError as e:
+            self.info_label.setText(f"设置保存失败（不影响本次操作）：{e}")
 
-    def _batch_export(self) -> None:
-        templates = list_templates(default_template_dir())
-        if not templates:
-            QMessageBox.information(self, "提示", "还没有模板。请先在「模板」菜单保存一个。")
-            return
-        names = [t.stem for t in templates]
-        name, ok = QInputDialog.getItem(self, "批量导出", "选择模板：", names, 0, False)
-        if not ok:
-            return
-        tpl_path = templates[names.index(name)]
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择要批量盖章的合同（可多选）", "",
-            "合同文件 (*.pdf *.jpg *.jpeg *.png *.bmp *.tif *.tiff)",
-        )
-        if not paths:
-            return
-        target_last = QMessageBox.question(
-            self, "盖章位置", "把模板盖在每个文件的【最后一页】吗？\n（选 No 则盖第一页）"
-        )
-        # P1：批量也支持骑缝章（用面板当前选中的印章，全部页，每文件独立手感）
-        with_perf = False
-        perf_seal = self.panel.current_seal()
-        if perf_seal is not None:
-            with_perf = QMessageBox.question(
-                self, "骑缝章",
-                f"是否同时加盖骑缝章（全部页，用「{perf_seal.name}」）？",
-            ) == QMessageBox.Yes
+    def _refresh_output_dir_action(self) -> None:
+        target = self.settings.output_dir or "与源文件同目录"
+        self.out_dir_act.setText(f"输出目录：{target}")
+        self.out_dir_act.setToolTip("点击恢复为「与源文件同目录」")
+        self.out_dir_act.setEnabled(bool(self.settings.output_dir))
 
-        done, failed = [], []
-        for path in paths:
-            try:
-                self._load_document([path])
-                page_idx = len(self.doc.pages) - 1 if target_last == QMessageBox.Yes else 0
-                count = self._apply_template(tpl_path, target_page=page_idx)
-                if count == 0:
-                    failed.append((path, "模板中的印章不在库中"))
-                    continue
-                if with_perf:
-                    self._apply_perforation_records(perf_seal, secrets.randbelow(2**31 - 1))
-                out = self._export_document()
-                done.append(out)
-            except Exception as e:
-                failed.append((path, str(e)))
+    def _choose_output_dir(self) -> None:
+        start = self.settings.output_dir or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "选择盖章后文件的输出目录", start)
+        if not chosen:
+            return
+        self.settings.output_dir = chosen
+        self._save_settings()
+        self._refresh_output_dir_action()
+        self.info_label.setText(f"输出目录已设为：{chosen}")
 
-        msg = f"成功 {len(done)} 个：\n" + "\n".join(str(p) for p in done[:10])
-        if failed:
-            msg += f"\n\n失败 {len(failed)} 个：\n" + "\n".join(
-                f"{p}: {e}" for p, e in failed[:5]
-            )
-        QMessageBox.information(self, "批量导出完成", msg)
-        # 批量结束后清空当前文档，避免误操作
-        if self.doc is not None:
-            self.doc.close()
-        self.doc = None
-        self.stamps = {}
-        self._undo_stack.clear()
-        self.page_list.clear()
+    def _reset_output_dir(self) -> None:
+        self.settings.output_dir = ""
+        self._save_settings()
+        self._refresh_output_dir_action()
+        self.info_label.setText("输出目录已恢复为「与源文件同目录」")
+
+    def _default_output_path(self) -> Path:
+        out_dir = self.settings.resolved_output_dir(self.doc.source_path)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            out_dir = Path.cwd()  # 设置里的目录被删了/没权限，退回当前目录
+        return make_output_path(self.doc.source_path, out_dir)
 
     # ── 导出 ──
 
-    def _export_document(self) -> Path:
+    def _export_document(self, out_path: Path | None = None) -> Path:
         """把当前 doc + stamps 导出为 PDF（批量与单次导出共用）。返回输出路径。
 
         所见即所得：所有章直接使用落章时已采样的 processed 图像，
@@ -1081,22 +1320,21 @@ class MainWindow(QMainWindow):
         什么就导出什么；想换手感用「换一批手感」按钮主动重摇）。
         """
         spec = self.panel.random_spec()
-        stamp_logs = []
-        for page_idx, records in self.stamps.items():
-            for rec in records:
-                stamp_logs.append(
-                    {
-                        "page": page_idx + 1,
-                        "seal": rec.seal.name,
-                        "kind": "perforation_slice" if rec.locked else rec.seal.kind,
-                        "group": rec.group,
-                        "center_mm": [round(rec.center_x_mm, 2), round(rec.center_y_mm, 2)],
-                        "size_mm": rec.size_mm,
-                        "rotation_deg": rec.rotation_deg,
-                        "opacity": rec.opacity,
-                        "random": rec.applied.to_dict() if rec.applied else None,
-                    }
-                )
+        stamp_logs = [
+            {
+                "page": page_idx + 1,
+                "seal": rec.seal.name,
+                "kind": "perforation_slice" if rec.locked else rec.seal.kind,
+                "group": rec.group,
+                "center_mm": [round(rec.center_x_mm, 2), round(rec.center_y_mm, 2)],
+                "size_mm": rec.size_mm,
+                "rotation_deg": rec.rotation_deg,
+                "opacity": rec.opacity,
+                "random": rec.applied.to_dict() if rec.applied else None,
+            }
+            for page_idx, records in self.stamps.items()
+            for rec in records
+        ]
 
         images: list[np.ndarray] = []
         for page_idx, page in enumerate(self.doc.pages):
@@ -1116,8 +1354,7 @@ class MainWindow(QMainWindow):
                 )
             images.append(img)
 
-        out_dir = Path(self.doc.source_path).parent if self.doc.source_path else Path.cwd()
-        out_path = make_output_path(self.doc.source_path, out_dir)
+        out_path = Path(out_path) if out_path else self._default_output_path()
         sealog = {
             # 注意：顶层 seed 仅供参考；复现的权威数据是每枚章的 random.applied 值
             "seed": self._session_rng.seed,
@@ -1141,11 +1378,25 @@ class MainWindow(QMainWindow):
         self._sync_canvas_to_records()
         total_stamps = sum(len(v) for v in self.stamps.values())
         if total_stamps == 0:
-            ret = QMessageBox.question(self, "确认", "当前没有任何盖章，仍要导出吗？")
-            if ret != QMessageBox.Yes:
+            if QMessageBox.question(
+                self, "确认", "当前没有任何盖章，仍要导出吗？"
+            ) != QMessageBox.Yes:
                 return
+
+        default_path = self._default_output_path()
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "导出已盖章 PDF", str(default_path), "PDF 文件 (*.pdf)"
+        )
+        if not chosen:
+            return
+        out_path = Path(chosen).with_suffix(".pdf")
+        # 记住这次选的目录，下次默认还去那里
+        if str(out_path.parent) != str(default_path.parent):
+            self.settings.output_dir = str(out_path.parent)
+            self._save_settings()
+            self._refresh_output_dir_action()
         try:
-            out_path = self._export_document()
+            out_path = self._export_document(out_path)
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))
             return
@@ -1155,134 +1406,73 @@ class MainWindow(QMainWindow):
             self, "导出完成", f"已导出：\n{out_path}\n\n随机种子与参数已写入同名 .sealog"
         )
 
-
-class AboutDialog(QDialog):
-    """关于对话框：版本/链接/咖啡文案 + 内嵌赞赏码（打包进 exe，离线可见）。"""
-
-    def __init__(self, parent, version: str):
-        super().__init__(parent)
-        self.setWindowTitle("关于 合同盖章工具")
-        layout = QVBoxLayout(self)
-        text = QLabel(
-            f"<h3>合同盖章工具</h3>"
-            f"<p>版本 v{version}</p>"
-            f"<p>扫描合同盖章：物理尺寸 1:1、骑缝章、手写签名。<br>"
-            f"全程本地离线运行，不修改原始文件。</p>"
-            f"<p>源码：github.com/kimhero110/contract-sealer<br>"
-            f"gitee.com/xu512/contract-sealer</p>"
-            f"<p>☕ 这个工具没收你一分钱。<br>"
-            f"如果它帮你省过一个加班的晚上——<br>"
-            f"<b>给码农买杯咖啡，是他的福报。</b></p>"
-            f"<p style='color:gray'>仅限本单位已授权印章的内部流程使用。</p>"
+    def _batch_export(self) -> None:
+        templates = list_templates(default_template_dir())
+        if not templates:
+            QMessageBox.information(self, "提示", "还没有模板。请先在「模板」菜单保存一个。")
+            return
+        names = [t.stem for t in templates]
+        name, ok = QInputDialog.getItem(self, "批量导出", "选择模板：", names, 0, False)
+        if not ok:
+            return
+        tpl_path = templates[names.index(name)]
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择要批量盖章的合同（可多选）", "", self._FILE_FILTER
         )
-        text.setWordWrap(True)
-        layout.addWidget(text)
+        if not paths:
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择输出目录（直接取消 = 各自输出到源文件所在目录）",
+            self.settings.output_dir or "",
+        )
+        if out_dir:
+            self.settings.output_dir = out_dir
+            self._save_settings()
+            self._refresh_output_dir_action()
+        target_last = QMessageBox.question(
+            self, "盖章位置", "把模板盖在每个文件的【最后一页】吗？\n（选 No 则盖第一页）"
+        )
+        # 批量也支持骑缝章（用面板当前选中的印章，全部页，每文件独立手感）
+        perf_seal = self.panel.current_seal()
+        with_perf = perf_seal is not None and QMessageBox.question(
+            self, "骑缝章", f"是否同时加盖骑缝章（全部页，用「{perf_seal.name}」）？"
+        ) == QMessageBox.Yes
 
-        qr = _load_qr_pixmap(220)
-        if qr is not None:
-            img_label = QLabel()
-            img_label.setPixmap(qr)
-            img_label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(img_label)
+        progress = QProgressDialog("批量盖章中…", "取消", 0, len(paths), self)
+        progress.setWindowModality(Qt.WindowModal)
+        done: list[Path] = []
+        failed: list[tuple[str, str]] = []
+        for i, path in enumerate(paths):
+            progress.setValue(i)
+            progress.setLabelText(f"正在处理（{i + 1}/{len(paths)}）：{Path(path).name}")
+            if progress.wasCanceled():
+                break
+            try:
+                self._load_document([path])
+                page_idx = len(self.doc.pages) - 1 if target_last == QMessageBox.Yes else 0
+                if self._apply_template(tpl_path, target_page=page_idx) == 0:
+                    failed.append((path, "模板中的印章不在库中"))
+                    continue
+                if with_perf:
+                    self._apply_perforation_records(perf_seal, secrets.randbelow(2**31 - 1))
+                done.append(self._export_document())
+            except Exception as e:
+                failed.append((path, str(e)))
+        progress.setValue(len(paths))
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok)
-        btns.accepted.connect(self.accept)
-        layout.addWidget(btns)
-
-
-def _load_qr_pixmap(width: int):
-    """加载赞赏码：冻结版从 _MEIPASS，源码版从项目根目录 docs/。"""
-    import sys
-
-    from PySide6.QtGui import QPixmap
-
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
-    path = base / "docs" / "coffee.png"
-    if not path.exists():
-        return None
-    pm = QPixmap(str(path))
-    if pm.isNull():
-        return None
-    return pm.scaledToWidth(width, Qt.SmoothTransformation)
-
-
-class _WarpPreviewDialog(QDialog):
-    """四点校准预览：显示拉伸裁正后的 A4 页面，确认才应用。"""
-
-    def __init__(self, parent, warped_img: np.ndarray):
-        super().__init__(parent)
-        self.setWindowTitle("四点校准预览")
-        layout = QVBoxLayout(self)
-        hint = QLabel("页面将按你点的四个角拉伸为标准 A4，效果如下。确认应用吗？")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        pm = np_rgb_to_qpixmap(warped_img)
-        if pm.height() > 640:
-            pm = pm.scaledToHeight(640, Qt.SmoothTransformation)
-        label = QLabel()
-        label.setPixmap(pm)
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-
-class _CalibrateDialog(QDialog):
-    """纸边校准（M1 手动路径）：输入纸张真实物理尺寸。"""
-
-    def __init__(self, parent, cur_w: float, cur_h: float):
-        super().__init__(parent)
-        self.setWindowTitle("纸边校准")
-        form = QFormLayout(self)
-        self.w_spin = QDoubleSpinBox()
-        self.w_spin.setRange(20.0, 2000.0)
-        self.w_spin.setSuffix(" mm")
-        self.w_spin.setValue(cur_w)
-        self.h_spin = QDoubleSpinBox()
-        self.h_spin.setRange(20.0, 2000.0)
-        self.h_spin.setSuffix(" mm")
-        self.h_spin.setValue(cur_h)
-        form.addRow("纸张宽", self.w_spin)
-        form.addRow("纸张高", self.h_spin)
-        hint = QLabel("用尺子量扫描件上的纸张实际尺寸（A4 = 210 × 297mm）。")
-        hint.setStyleSheet("color: gray;")
-        form.addRow(hint)
-        from PySide6.QtWidgets import QCheckBox
-
-        self.all_check = QCheckBox("应用到所有页面")
-        self.all_check.setChecked(True)
-        form.addRow(self.all_check)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def values(self) -> tuple[float, float, bool]:
-        return self.w_spin.value(), self.h_spin.value(), self.all_check.isChecked()
-
-
-def _display_image(img: np.ndarray, max_long_side: int = 1754) -> np.ndarray:
-    """画布显示用降采样（~150DPI A4）。全尺寸纹理只在深放大时才需要，屏显是浪费。"""
-    import cv2
-
-    h, w = img.shape[:2]
-    long_side = max(h, w)
-    if long_side <= max_long_side:
-        return img
-    scale = max_long_side / long_side
-    return cv2.resize(img, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
-
-
-def _thumbnail(img: np.ndarray, width: int) -> np.ndarray:
-    import cv2
-
-    h, w = img.shape[:2]
-    return cv2.resize(img, (width, max(1, round(h * width / w))), interpolation=cv2.INTER_AREA)
-
-
-def _natural_key(path: str):
-    import re
-
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", Path(path).name)]
+        msg = f"成功 {len(done)} 个：\n" + "\n".join(str(p) for p in done[:10])
+        if failed:
+            msg += f"\n\n失败 {len(failed)} 个：\n" + "\n".join(
+                f"{p}: {e}" for p, e in failed[:5]
+            )
+        QMessageBox.information(self, "批量导出完成", msg)
+        # 批量结束后清空当前文档，避免误操作
+        if self.doc is not None:
+            self.doc.close()
+        self.doc = None
+        self.stamps = {}
+        self.current_page = -1
+        self._clear_history()
+        self.page_list.clear()
+        self.canvas.clear_page()

@@ -6,13 +6,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QVBoxLayout,
     QWidget,
-    QComboBox,
 )
 
 from core.extract import KIND_SEAL, KIND_SIGNATURE, detect_kind, extract_ink
@@ -33,6 +32,8 @@ from core.seal import (
     Seal,
     default_library_dir,
     list_library,
+    slug_taken,
+    unique_name,
 )
 
 
@@ -42,6 +43,7 @@ class SealPanel(QWidget):
     stamp_requested = Signal(object)   # Seal
     perforation_requested = Signal(object)  # Seal（骑缝章）
     reroll_requested = Signal()        # 换一批手感
+    date_requested = Signal()          # 加盖日期
     export_requested = Signal()
     random_changed = Signal(object)    # RandomSpec
 
@@ -99,9 +101,14 @@ class SealPanel(QWidget):
         layout.addWidget(rnd_group)
 
         self.btn_reroll = QPushButton("🎲 换一批手感")
-        self.btn_reroll.setToolTip("重摇所有章/签名的随机效果（骑缝切片不受影响）")
+        self.btn_reroll.setToolTip("重摇所有章/签名的随机效果（骑缝切片与日期不受影响）")
         self.btn_reroll.clicked.connect(self.reroll_requested)
         layout.addWidget(self.btn_reroll)
+
+        self.btn_date = QPushButton("📅 加盖日期…")
+        self.btn_date.setToolTip("默认系统当天，也可以自己挑日期和格式（Ctrl+D）")
+        self.btn_date.clicked.connect(self.date_requested)
+        layout.addWidget(self.btn_date)
 
         # ── 选中印章信息 ──
         self.info_label = QLabel("未选中印章")
@@ -206,9 +213,27 @@ class SealPanel(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         name, kind, phys_mm = dlg.values()
+        overwrite = False
+        if slug_taken(self.library_dir, name):
+            # 文件名冲突：同名，或不同显示名转义后撞到同一个 slug
+            # （"公章(1)" 与 "公章 1" 都变成 公章_1）。绝不静默覆盖。
+            choice = QMessageBox.question(
+                self,
+                "印章库里已有同名文件",
+                f"「{name}」对应的文件已存在。\n\n"
+                f"是 = 覆盖旧的；否 = 存为「{unique_name(self.library_dir, name)}」；取消 = 不导入。",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.No,
+            )
+            if choice == QMessageBox.Cancel:
+                return
+            if choice == QMessageBox.Yes:
+                overwrite = True
+            else:
+                name = unique_name(self.library_dir, name)
         seal = Seal(name=name, kind=kind, image=rgba, phys_mm=phys_mm)
         try:
-            seal.save(self.library_dir)
+            seal.save(self.library_dir, overwrite=overwrite)
         except Exception as e:
             QMessageBox.warning(self, "保存失败", str(e))
 

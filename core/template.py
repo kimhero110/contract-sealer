@@ -7,14 +7,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+
+from .paths import app_data_dir
 
 
 def default_template_dir() -> Path:
-    base = os.environ.get("APPDATA")
-    root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-    return root / "contract-sealer" / "templates"
+    return app_data_dir() / "templates"
 
 
 def save_template(template_dir: Path, name: str, entries: list[dict]) -> Path:

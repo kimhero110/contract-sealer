@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
-
-from app.canvas import np_rgb_to_qpixmap
 
 MAG_SIZE = 180          # 放大镜边长（px）
 HALF_WINDOW_MM = 8.0    # 取景半径（mm）→ 180px / 16mm ≈ 11px/mm ≈ 6 倍放大

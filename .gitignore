@@ -13,3 +13,11 @@ tests/smoke_out/
 /*.exe
 /*_已盖章_*
 *.sealog
+
+# 构建产物（PyInstaller / setuptools）——绝不入库
+build/
+dist/
+_internal/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

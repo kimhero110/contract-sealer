@@ -2,15 +2,14 @@
 
 import numpy as np
 import pytest
+
+pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication
 
-from app.canvas import np_rgb_to_qpixmap
-from app.main_window import MainWindow, _thumbnail
+from app.main_window import MainWindow
 from core.document import Document, Page
-from core.seal import Seal
-from core.extract import extract_ink
 
 FIX = "tests/fixtures"
 
@@ -26,8 +25,7 @@ def _make_window(qapp, page: Page | None = None) -> MainWindow:
     if page is None:
         page = Page(image=np.full((1754, 1240, 3), 250, np.uint8), phys_w_mm=210.0, phys_h_mm=297.0)
     win.doc = Document(pages=[page])
-    win.page_list.addItem(QListWidgetItem(np_rgb_to_qpixmap(_thumbnail(page.thumbnail(), 140)), "第 1 页"))
-    win.page_list.setCurrentRow(0)
+    win._rebuild_page_list(select=0)
     win.show()
     return win
 

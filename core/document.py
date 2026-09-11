@@ -20,6 +20,7 @@ v0.3.0 起页面图像**懒加载**（P0 内存修复）：
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -44,6 +45,10 @@ SUPPORTED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # LRU 容量：同时驻留的全尺寸页面数（A4@300DPI 每页约 25MB）
 PAGE_CACHE_LIMIT = 6
 
+# 页面唯一标识：LRU 的键。不能用 id(page)——删页后对象被回收，
+# 新页可能复用同一个 id 并拿到上一页的缓存图像。
+_page_uid = itertools.count(1)
+
 
 def mm_to_px(mm: float, dpi: float) -> float:
     """毫米 → 像素。例：40mm @300DPI ≈ 472.44px。"""
@@ -66,6 +71,7 @@ class Page:
         needs_calibration: bool = False,
         render_fn=None,
         thumbnail_fn=None,
+        source_name: str = "",
     ):
         if image is None and render_fn is None:
             raise ValueError("Page 需要 image 或 render_fn 之一")
@@ -75,6 +81,11 @@ class Page:
         self.phys_w_mm = float(phys_w_mm)
         self.phys_h_mm = float(phys_h_mm)
         self.needs_calibration = needs_calibration
+        self.source_name = source_name  # 来源文件名，页列表分组/删除整个文档用
+        self.uid = next(_page_uid)
+        # 图像变更计数：缩略图缓存的失效依据。不能用 id(数组) —— 旧数组被回收后
+        # 新数组可能复用同一个 id，撤销旋转会拿回旋转过的缩略图。
+        self.revision = 0
         self._owner: Document | None = None  # 由 Document 设置，LRU 用
 
     # ── 图像访问（懒加载核心）──
@@ -90,6 +101,7 @@ class Page:
     def image(self, arr: np.ndarray) -> None:
         """写入即变异：脱离懒加载，永久驻留（旋转/校准依赖此语义）。"""
         self._override = arr
+        self.revision += 1
 
     @property
     def mutated(self) -> bool:
@@ -148,11 +160,14 @@ class Document:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._cache_limit = PAGE_CACHE_LIMIT
         self._pdf = None  # 懒加载需要保持 PDF 句柄打开
+        self._sources: list[Document] = []  # 追加导入的来源文档（保持其句柄存活）
+        for page in self.pages:
+            page._owner = self
 
     # ── LRU ──
 
     def _cache_get(self, page: Page) -> np.ndarray:
-        key = id(page)
+        key = page.uid
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
@@ -164,7 +179,7 @@ class Document:
         return img
 
     def close(self) -> None:
-        """释放 PDF 句柄与缓存。"""
+        """释放 PDF 句柄与缓存（含追加导入带来的来源文档）。"""
         self._cache.clear()
         if self._pdf is not None:
             try:
@@ -172,6 +187,42 @@ class Document:
             except Exception:
                 pass
             self._pdf = None
+        for src in self._sources:
+            src.close()
+        self._sources = []
+
+    # ── 页面增删（待处理文档管理）──
+
+    def extend(self, other: Document) -> list[Page]:
+        """把另一个文档的页追加到本文档末尾，返回新增的页。
+
+        来源文档被保留引用：它的页是懒加载的，render_fn 闭包里还握着
+        对方的 PDF 句柄，提前 close 掉会让翻到这些页时直接炸。
+        """
+        added = list(other.pages)
+        for page in added:
+            page._owner = self
+        self.pages.extend(added)
+        self._sources.append(other)
+        other.pages = []
+        return added
+
+    def remove_pages(self, indices: list[int]) -> list[Page]:
+        """按下标删除页，返回被删掉的页（调用方负责保存以便撤销）。"""
+        doomed = {i for i in indices if 0 <= i < len(self.pages)}
+        if not doomed:
+            return []
+        removed = [self.pages[i] for i in sorted(doomed)]
+        self.pages = [p for i, p in enumerate(self.pages) if i not in doomed]
+        for page in removed:
+            self._cache.pop(page.uid, None)  # 缓存跟着页一起走，不留悬挂图像
+        return removed
+
+    def insert_pages(self, items: list[tuple[int, Page]]) -> None:
+        """按 (下标, 页) 还原被删除的页（撤销用）。下标按升序依次插入。"""
+        for index, page in sorted(items, key=lambda it: it[0]):
+            page._owner = self
+            self.pages.insert(min(index, len(self.pages)), page)
 
     def __del__(self) -> None:
         try:
@@ -182,7 +233,7 @@ class Document:
     # ── 打开 ──
 
     @classmethod
-    def open(cls, path: str | Path, dpi: float = DEFAULT_DPI) -> "Document":
+    def open(cls, path: str | Path, dpi: float = DEFAULT_DPI) -> Document:
         """打开 PDF 或单张图片。多图合成文档用 from_images。"""
         path = Path(path)
         suffix = path.suffix.lower()
@@ -193,7 +244,7 @@ class Document:
         raise ValueError(f"不支持的文件类型: {path.suffix}")
 
     @classmethod
-    def _open_pdf(cls, path: Path, dpi: float) -> "Document":
+    def _open_pdf(cls, path: Path, dpi: float) -> Document:
         doc = cls()
         pdf = pymupdf.open(path)
         if pdf.needs_pass:
@@ -212,6 +263,7 @@ class Document:
                 phys_h_mm=phys_h_mm,
                 render_fn=lambda idx=i: doc._render_pdf_page(idx, dpi),
                 thumbnail_fn=lambda d, idx=i: doc._render_pdf_page(idx, d),
+                source_name=path.name,
             )
             # 比例检测用 page box（pt 比例 = 像素比例），无需渲染
             long_s = max(rect.width, rect.height)
@@ -227,8 +279,8 @@ class Document:
             raise ValueError("PDF 没有页面")
         doc.pages = pages
         doc.source_path = path
-        for p in doc.pages:
-            p._owner = doc
+        for page in pages:
+            page._owner = doc
         return doc
 
     def _render_pdf_page(self, index: int, dpi: float) -> np.ndarray:
@@ -241,7 +293,7 @@ class Document:
         return np.ascontiguousarray(img)
 
     @classmethod
-    def from_images(cls, paths: list[str | Path], dpi: float = DEFAULT_DPI) -> "Document":
+    def from_images(cls, paths: list[str | Path], dpi: float = DEFAULT_DPI) -> Document:
         """图片合成文档。物理尺寸按 A4 假定（按长宽比推断方向），并做比例检测。"""
         import cv2
 
@@ -275,6 +327,7 @@ class Document:
                 phys_h_mm=phys_h,
                 render_fn=render,
                 thumbnail_fn=thumb,
+                source_name=path.name,
             )
             ratio = max(w, h) / min(w, h)
             page.needs_calibration = (
@@ -286,8 +339,8 @@ class Document:
             raise ValueError("没有可用的图片")
         doc.pages = pages
         doc.source_path = Path(paths[0]) if len(paths) == 1 else None
-        for pg in doc.pages:
-            pg._owner = doc
+        for page in pages:
+            page._owner = doc
         return doc
 
 

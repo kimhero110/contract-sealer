@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 
 import cv2
 import numpy as np
@@ -30,7 +30,7 @@ class RandomSpec:
     tone: float = 0.10       # 明度/饱和度 ±比例
     dust: float = 0.15       # 蒙尘强度 0-1
 
-    def clamped(self) -> "RandomSpec":
+    def clamped(self) -> RandomSpec:
         return RandomSpec(
             angle_deg=min(abs(self.angle_deg), CAP_ANGLE_DEG),
             tone=min(abs(self.tone), CAP_TONE),
@@ -54,7 +54,7 @@ class AppliedRandom:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "AppliedRandom":
+    def from_dict(cls, d: dict) -> AppliedRandom:
         return cls(
             angle_deg=float(d["angle_deg"]),
             tone_scale=float(d["tone_scale"]),

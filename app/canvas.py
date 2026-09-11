@@ -157,6 +157,14 @@ class PageCanvas(QGraphicsView):
         self._scene.setSceneRect(0, 0, phys_w_mm, phys_h_mm)
         self.fit_page()
 
+    def clear_page(self) -> None:
+        """清空画布（关闭文档 / 删光页面时）。"""
+        self.cancel_follow()
+        self.cancel_pick()
+        self._scene.clear()
+        self._page_item = None
+        self._scene.setSceneRect(0, 0, 0, 0)
+
     def fit_page(self) -> None:
         if self._scene.sceneRect().isValid():
             self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
