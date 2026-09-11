@@ -8,14 +8,24 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QImage, QKeyEvent, QPainter, QPen, QPixmap, QWheelEvent
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QImage,
+    QKeyEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
-    QGraphicsLineItem,
+    QGraphicsItem,
     QGraphicsPixmapItem,
+    QGraphicsPolygonItem,
     QGraphicsScene,
-    QGraphicsSimpleTextItem,
     QGraphicsView,
 )
 
@@ -101,13 +111,70 @@ class StampItem(QGraphicsPixmapItem):
             painter.drawRect(r)
 
 
+class QuadHandle(QGraphicsEllipseItem):
+    """四点校准的可拖角点。位置即场景 mm 坐标。
+
+    半径按屏幕像素维持恒定：场景单位是毫米，不跟着缩放补偿的话，
+    放大到 10 倍时把手会变成一个盖住半张纸的大圆饼。
+    """
+
+    RADIUS_PX = 9.0
+    LABELS = ("左上", "右上", "右下", "左下")
+
+    def __init__(self, index: int, x_mm: float, y_mm: float, px_per_mm: float):
+        super().__init__()
+        self.index = index
+        self._notify = None  # 由画布注入：位置变化回调
+        self.setFlags(
+            QGraphicsItem.ItemIsMovable
+            | QGraphicsItem.ItemIsSelectable
+            | QGraphicsItem.ItemSendsGeometryChanges  # itemChange 才会收到位置变化
+        )
+        self.setBrush(QBrush(QColor(0, 120, 255, 170)))
+        self.setPen(QPen(Qt.white, 0))
+        self.setZValue(30)
+        self.setToolTip(f"{self.LABELS[index]}角：拖动调整，方向键微调 0.1mm（Shift 1mm）")
+        self.set_screen_scale(px_per_mm)
+        self.setPos(x_mm, y_mm)
+
+    def set_screen_scale(self, px_per_mm: float) -> None:
+        r = self.RADIUS_PX / max(px_per_mm, 1e-6)
+        self.setRect(-r, -r, 2 * r, 2 * r)
+        pen = QPen(Qt.white, 2.0 / max(px_per_mm, 1e-6))
+        self.setPen(pen)
+
+    def point(self) -> tuple[float, float]:
+        return self.pos().x(), self.pos().y()
+
+    def itemChange(self, change, value):
+        # 钳在页面范围内用 ItemPositionChange（移动**之前**改写目标位置），
+        # 而不是移动之后再 setPos 拉回来——后者会让 itemChange 递归自触发。
+        if change == QGraphicsItem.ItemPositionChange and self.scene() is not None:
+            rect = self.scene().sceneRect()
+            if rect.isValid():
+                return QPointF(
+                    min(max(value.x(), rect.left()), rect.right()),
+                    min(max(value.y(), rect.top()), rect.bottom()),
+                )
+        elif change == QGraphicsItem.ItemPositionHasChanged and self._notify:
+            self._notify(self)
+        return super().itemChange(change, value)
+
+
 class PageCanvas(QGraphicsView):
     """页面视图：滚轮缩放、印章拖动、方向键 0.1mm 微调（Shift=1mm）。
 
-    额外交互模式（修改意见）：
+    额外交互模式：
     - 跟随落章：印章跟随鼠标，单击落位，Esc 取消；
     - 单击移位：空白处单击（位移 <5px，区别于拖拽平移）把选中章移过去；
-    - 四点拾取：依次点击 4 个点（纸面角点），画标记①②③④+连线。
+    - 四点校准：四个可拖把手 + 实时四边形，回车确认，Esc 取消。
+
+    四点校准为什么是"拖把手"而不是"点四下"：点击模型下点了就定死，
+    错一个角只能整个重来；点击自带一两像素抖动，而放大镜是六倍，
+    用户在放大镜里看到没对准时点已经落下了；更要命的是取点期间
+    dragMode 被设成 NoDrag，能缩放却不能平移——放大到看得清纸角后
+    根本挪不到下一个角。把手模型天然是"按下→拖→松开"，随时可改，
+    且沿用 ScrollHandDrag：拖把手是调整，拖空白处是平移。
     """
 
     stamp_moved = Signal(object)      # StampItem
@@ -116,8 +183,9 @@ class PageCanvas(QGraphicsView):
     place_rejected = Signal()         # 落位点击在页面外（护栏拦截）
     follow_cancelled = Signal()
     canvas_clicked = Signal(object, float, float)  # (候选 StampItem, x_mm, y_mm)
-    points_picked = Signal(list)      # [QPointF x 4]（mm 场景坐标）
-    pick_cancelled = Signal()
+    quad_changed = Signal(list)       # [(x_mm, y_mm) x 4] 拖动中实时上报
+    quad_accepted = Signal(list)      # 回车确认
+    quad_cancelled = Signal()
 
     CLICK_THRESHOLD_PX = 5
 
@@ -133,10 +201,10 @@ class PageCanvas(QGraphicsView):
         self._just_placed = False                   # 消费式：落位后紧邻一次 click 不触发移位
         # 跟随落章状态
         self._follow_item: StampItem | None = None
-        # 四点拾取状态
-        self._pick_mode = False
-        self._pick_points: list = []
-        self._pick_items: list = []
+        # 四点校准状态
+        self._quad_mode = False
+        self._quad_handles: list[QuadHandle] = []
+        self._quad_outline: QGraphicsPolygonItem | None = None
         # 放大镜（精确点选辅助）：取景回调由主窗口注入
         from app.magnifier import Magnifier
 
@@ -147,7 +215,11 @@ class PageCanvas(QGraphicsView):
 
     def show_page(self, page_rgb: np.ndarray, phys_w_mm: float, phys_h_mm: float) -> None:
         self.cancel_follow()
-        self.cancel_pick()
+        was_adjusting = self._quad_mode
+        self.cancel_quad_adjust()
+        if was_adjusting:
+            # 校准途中翻页/刷新会丢掉把手，得说一声，不能让它们无声消失
+            self.quad_cancelled.emit()
         self._scene.clear()
         pm = np_rgb_to_qpixmap(page_rgb)
         self._page_item = self._scene.addPixmap(pm)
@@ -157,10 +229,15 @@ class PageCanvas(QGraphicsView):
         self._scene.setSceneRect(0, 0, phys_w_mm, phys_h_mm)
         self.fit_page()
 
+    def scale(self, sx: float, sy: float) -> None:
+        """重写以便任何缩放路径（菜单放大/缩小、代码调用）都同步把手尺寸。"""
+        super().scale(sx, sy)
+        self._rescale_quad_handles()
+
     def clear_page(self) -> None:
         """清空画布（关闭文档 / 删光页面时）。"""
         self.cancel_follow()
-        self.cancel_pick()
+        self.cancel_quad_adjust()
         self._scene.clear()
         self._page_item = None
         self._scene.setSceneRect(0, 0, 0, 0)
@@ -168,6 +245,7 @@ class PageCanvas(QGraphicsView):
     def fit_page(self) -> None:
         if self._scene.sceneRect().isValid():
             self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+            self._rescale_quad_handles()
 
     # ── 印章管理 ──
 
@@ -196,7 +274,7 @@ class PageCanvas(QGraphicsView):
     def start_follow(self, rgba: np.ndarray, size_mm: float) -> None:
         """印章跟随鼠标，单击落位，Esc 取消。"""
         self.cancel_follow()
-        self.cancel_pick()
+        self.cancel_quad_adjust()
         self._reset_press_state()
         self._follow_item = StampItem(rgba, size_mm, 0, 0)
         self._follow_item.setOpacity(0.7)  # 跟随中半透明示意
@@ -227,63 +305,106 @@ class PageCanvas(QGraphicsView):
         self._press_view_pos = None
         self._press_stamp = None
 
-    # ── 四点拾取模式（修改意见：纸面四顶点）──
+    # ── 四点校准模式（可拖把手）──
 
-    def start_pick_points(self) -> None:
+    def start_quad_adjust(self, points_mm: list[tuple[float, float]]) -> None:
+        """进入四点校准：按给定初值放四个把手，用户拖动调整。
+
+        points_mm 已由调用方排好序（左上/右上/右下/左下），初值来自
+        自动纸边检测，检测失败时是页面内缩框——用户永远不从零开始。
+        """
         self.cancel_follow()
-        self.cancel_pick()
+        self.cancel_quad_adjust()
         self._reset_press_state()
-        self._pick_mode = True
-        self._pick_points = []
-        self._pick_items = []
-        self.setDragMode(QGraphicsView.NoDrag)
-        self.setMouseTracking(True)  # 悬停也驱动放大镜
+        self._quad_mode = True
+        px_per_mm = self._px_per_mm()
+        for i, (x, y) in enumerate(points_mm[:4]):
+            handle = QuadHandle(i, x, y, px_per_mm)
+            handle._notify = self._on_handle_moved
+            self._scene.addItem(handle)
+            self._quad_handles.append(handle)
+        self._quad_outline = QGraphicsPolygonItem()
+        self._quad_outline.setPen(QPen(QColor(0, 120, 255), 0, Qt.DashLine))
+        self._quad_outline.setBrush(QBrush(QColor(0, 120, 255, 28)))
+        self._quad_outline.setZValue(29)
+        self._scene.addItem(self._quad_outline)
+        self._refresh_quad_outline()
+        # 保持 ScrollHandDrag：拖把手=调整，拖空白=平移。
+        # 旧流程在这里设 NoDrag，于是能缩放却不能平移，是最劝退的一环。
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setMouseTracking(True)
+        if self._quad_handles:
+            self._quad_handles[0].setSelected(True)
+        self.quad_changed.emit(self.quad_points())
 
-    def cancel_pick(self) -> None:
-        self._pick_mode = False
-        self._pick_points = []
-        for it in self._pick_items:
-            self._scene.removeItem(it)
-        self._pick_items = []
+    def cancel_quad_adjust(self) -> None:
+        self._quad_mode = False
+        for handle in self._quad_handles:
+            handle._notify = None
+            self._scene.removeItem(handle)
+        self._quad_handles = []
+        if self._quad_outline is not None:
+            self._scene.removeItem(self._quad_outline)
+            self._quad_outline = None
         if not self.following:
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
             self.setMouseTracking(False)
             self._magnifier.hide()
         self._reset_press_state()
 
     @property
-    def picking(self) -> bool:
-        return self._pick_mode
+    def adjusting_quad(self) -> bool:
+        return self._quad_mode
 
-    def _add_pick_marker(self, pos, index: int) -> None:
-        r = 1.2  # mm
-        dot = QGraphicsEllipseItem(pos.x() - r, pos.y() - r, 2 * r, 2 * r)
-        dot.setBrush(QBrush(QColor(0, 120, 255)))
-        dot.setPen(QPen(Qt.white, 0))
-        dot.setZValue(20)
-        self._scene.addItem(dot)
-        self._pick_items.append(dot)
-        label = QGraphicsSimpleTextItem(str(index))
-        label.setBrush(QBrush(QColor(0, 120, 255)))
-        label.setScale(0.6 / self.transform().m11() if self.transform().m11() > 0 else 3)
-        label.setPos(pos.x() + r, pos.y() - 4 * r)
-        label.setZValue(20)
-        self._scene.addItem(label)
-        self._pick_items.append(label)
-        if len(self._pick_points) > 1:
-            prev = self._pick_points[-2]
-            line = QGraphicsLineItem(prev.x(), prev.y(), pos.x(), pos.y())
-            line.setPen(QPen(QColor(0, 120, 255), 0))
-            line.setZValue(19)
-            self._scene.addItem(line)
-            self._pick_items.append(line)
-        if len(self._pick_points) == 4:  # 闭合
-            first, last = self._pick_points[0], self._pick_points[3]
-            line = QGraphicsLineItem(last.x(), last.y(), first.x(), first.y())
-            line.setPen(QPen(QColor(0, 120, 255), 0))
-            line.setZValue(19)
-            self._scene.addItem(line)
-            self._pick_items.append(line)
+    def quad_points(self) -> list[tuple[float, float]]:
+        return [h.point() for h in self._quad_handles]
+
+    def selected_handle(self) -> QuadHandle | None:
+        for handle in self._quad_handles:
+            if handle.isSelected():
+                return handle
+        return None
+
+    def _px_per_mm(self) -> float:
+        """视图缩放系数：场景单位是 mm，m11 即每毫米占多少屏幕像素。"""
+        scale = self.transform().m11()
+        return scale if scale > 1e-9 else 1.0
+
+    def _rescale_quad_handles(self) -> None:
+        """缩放后让把手保持恒定的屏幕尺寸。"""
+        px_per_mm = self._px_per_mm()
+        for handle in self._quad_handles:
+            handle.set_screen_scale(px_per_mm)
+
+    def _refresh_quad_outline(self) -> None:
+        if self._quad_outline is None:
+            return
+        self._quad_outline.setPolygon(
+            QPolygonF([QPointF(x, y) for x, y in self.quad_points()])
+        )
+
+    def _on_handle_moved(self, handle: QuadHandle) -> None:
+        """把手位置变化：刷新轮廓、驱动放大镜、上报。范围钳制在把手内部完成。"""
+        cx, cy = handle.point()
+        self._refresh_quad_outline()
+        if self.magnifier_source is not None:
+            pm = self.magnifier_source(cx, cy)
+            if pm is not None:
+                self._magnifier.set_crop(pm)
+                self._magnifier.follow_cursor(self._handle_global_pos(handle))
+                self._magnifier.show()
+        self.quad_changed.emit(self.quad_points())
+
+    def _handle_global_pos(self, handle: QuadHandle):
+        """把手在屏幕上的位置：拖动时放大镜贴着把手走，而不是贴着光标。"""
+        view_pos = self.mapFromScene(handle.pos())
+        return self.viewport().mapToGlobal(view_pos)
+
+    def _nudge_handle(self, dx: float, dy: float) -> bool:
+        handle = self.selected_handle()
+        if handle is None:
+            return False
+        handle.setPos(handle.pos().x() + dx, handle.pos().y() + dy)
+        return True
 
     # ── 事件 ──
 
@@ -293,18 +414,13 @@ class PageCanvas(QGraphicsView):
         sx = self.transform().m11()
         if sx * factor < 0.1 or sx * factor > 20.0:
             return
-        self.scale(factor, factor)
+        self.scale(factor, factor)  # 重写过的 scale 会同步把手尺寸
 
     def mousePressEvent(self, event) -> None:
-        if self._pick_mode and event.button() == Qt.LeftButton:
-            pos = self.mapToScene(event.position().toPoint())
-            self._pick_points.append(pos)
-            self._add_pick_marker(pos, len(self._pick_points))
-            if len(self._pick_points) == 4:
-                pts = [(p.x(), p.y()) for p in self._pick_points]
-                self._pick_mode = False
-                self.setDragMode(QGraphicsView.ScrollHandDrag)
-                self.points_picked.emit(pts)
+        if self._quad_mode:
+            # 把手由场景自己处理拖动，空白处交给 ScrollHandDrag 平移；
+            # 单击移位那套逻辑在校准模式下不参与，避免误移印章
+            super().mousePressEvent(event)
             return
         # 先记录候选章，再调 super()——super 在空白处按下时会清空选中（Bug 1 修复）
         if event.button() == Qt.LeftButton:
@@ -314,8 +430,8 @@ class PageCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def _update_magnifier(self, scene_pos, global_pos) -> None:
-        """精确点选模式（拾取/跟随）下驱动放大镜。"""
-        active = self._pick_mode or self._follow_item is not None
+        """跟随落章时驱动放大镜。四点校准的放大镜由把手移动回调驱动。"""
+        active = self._follow_item is not None
         if active and self.magnifier_source is not None:
             pm = self.magnifier_source(scene_pos.x(), scene_pos.y())
             if pm is not None:
@@ -331,16 +447,17 @@ class PageCanvas(QGraphicsView):
             self._follow_item.set_center(pos.x(), pos.y())
             self._update_magnifier(pos, event.globalPosition().toPoint())
             return
-        if self._pick_mode:
-            # 需要鼠标跟踪才能在未按下时也收到 move 事件
-            self.setMouseTracking(True)
-            pos = self.mapToScene(event.position().toPoint())
-            self._update_magnifier(pos, event.globalPosition().toPoint())
+        if self._quad_mode:
+            super().mouseMoveEvent(event)  # 把手拖动 / 空白处平移
             return
         self._magnifier.hide()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._quad_mode:
+            super().mouseReleaseEvent(event)
+            self._magnifier.hide()  # 松开才定稿，放大镜随即收起
+            return
         if self._follow_item is not None and event.button() == Qt.LeftButton:
             pos = self.mapToScene(event.position().toPoint())
             # 页面外护栏：完全点在页面矩形外时忽略，防止盖出"隐形章"
@@ -380,11 +497,32 @@ class PageCanvas(QGraphicsView):
                 self.cancel_follow()
                 self.follow_cancelled.emit()
                 return
-            if self.picking:
-                self.cancel_pick()
-                self.pick_cancelled.emit()
+            if self._quad_mode:
+                self.cancel_quad_adjust()
+                self.quad_cancelled.emit()
                 return
         step = 1.0 if event.modifiers() & Qt.ShiftModifier else 0.1
+        if self._quad_mode:
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self.quad_accepted.emit(self.quad_points())
+                return
+            nudges = {
+                Qt.Key_Left: (-step, 0.0),
+                Qt.Key_Right: (step, 0.0),
+                Qt.Key_Up: (0.0, -step),
+                Qt.Key_Down: (0.0, step),
+            }
+            if event.key() in nudges and self._nudge_handle(*nudges[event.key()]):
+                return
+            if event.key() == Qt.Key_Tab:  # 在四个角之间轮转，纯键盘也能走完
+                handles = self._quad_handles
+                current = self.selected_handle()
+                nxt = handles[(handles.index(current) + 1) % len(handles)] if current else handles[0]
+                self._scene.clearSelection()
+                nxt.setSelected(True)
+                return
+            super().keyPressEvent(event)
+            return
         moves = {
             Qt.Key_Left: (-step, 0),
             Qt.Key_Right: (step, 0),

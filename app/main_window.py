@@ -49,9 +49,21 @@ from app.dialogs import AboutDialog, CalibrateDialog, DateStampDialog, WarpPrevi
 from app.imageutil import display_image, natural_key, thumbnail
 from app.perforation_dialog import PerforationDialog
 from app.seal_panel import SealPanel
-from core.autocal import auto_calibrate_page, map_points_through, warp_to_a4
+from core.autocal import (
+    auto_calibrate_page,
+    initial_quad,
+    map_points_through,
+    quad_aspect,
+    warp_to_a4,
+)
 from core.datestamp import KIND_DATE, ink_width_mm, render_date_ink
-from core.document import Document, Page, calibrate_paper_edge
+from core.document import (
+    ASPECT_A_SERIES,
+    ASPECT_TOLERANCE,
+    Document,
+    Page,
+    calibrate_paper_edge,
+)
 from core.export import export_pdf, make_output_path
 from core.perforation import PerforationSpec, SlicePlacement, plan_perforation
 from core.randomize import AppliedRandom, Randomizer
@@ -151,8 +163,9 @@ class MainWindow(QMainWindow):
         self.canvas.place_rejected.connect(self._on_place_rejected)
         self.canvas.follow_cancelled.connect(self._on_follow_cancelled)
         self.canvas.canvas_clicked.connect(self._on_canvas_clicked)
-        self.canvas.points_picked.connect(self._on_points_picked)
-        self.canvas.pick_cancelled.connect(self._on_pick_cancelled)
+        self.canvas.quad_changed.connect(self._on_quad_changed)
+        self.canvas.quad_accepted.connect(self._on_quad_accepted)
+        self.canvas.quad_cancelled.connect(self._on_quad_cancelled)
         self.canvas.scene().selectionChanged.connect(self._on_selection_changed)
         splitter.addWidget(self.canvas)
 
@@ -259,7 +272,7 @@ class MainWindow(QMainWindow):
             ("↑ 上移", "当前页上移一位", lambda: self._move_page(-1)),
             ("↓ 下移", "当前页下移一位", lambda: self._move_page(1)),
             ("✖ 删除页", "删除页列表里选中的页（可撤销）", self._delete_pages),
-            ("▣ 四点校准", "点击纸面四个角点，透视拉正为标准 A4", self._four_point_calibrate),
+            ("▣ 四点校准", "拖四个把手贴住纸角，透视拉正为标准 A4（自动检测给初值）", self._four_point_calibrate),
             ("⛶ 适应", "视图缩放至整页（快捷键 F）", self.canvas.fit_page),
         ]:
             act = tb.addAction(label, fn)
@@ -303,7 +316,7 @@ class MainWindow(QMainWindow):
         # 页列表右键同款删除（ActionsContextMenu 直接复用 QAction）
         self.page_list.addAction(del_act)
         m_page.addSeparator()
-        m_page.addAction("四点纸边校准（点四个角）", self._four_point_calibrate)
+        m_page.addAction("四点纸边校准（拖四个角）", self._four_point_calibrate)
         self._add_action(m_page, "手动校准（输入尺寸）…", self._calibrate)
         m_page.addAction("自动纸边检测（全部页）", self._auto_calibrate)
 
@@ -1006,20 +1019,51 @@ class MainWindow(QMainWindow):
             self._refresh_page_thumbnail(self.current_page)
 
     def _four_point_calibrate(self) -> None:
-        """四点纸边校准：用户在页面上点纸面四个角点。
+        """四点纸边校准：自动检测纸面四角作为初值，用户拖把手微调。
 
-        扫描件自带白边 → 页面边界 ≠ 纸张边界。点完四个顶点后按透视变换
-        把页面拉伸裁正为标准 A4，白边消失、物理尺寸精确。
+        扫描件自带白边 → 页面边界 ≠ 纸张边界。确认后按透视变换把页面
+        拉伸裁正为标准 A4，白边消失、物理尺寸精确。
         """
         if self.doc is None or self.current_page < 0:
             return
-        self.info_label.setText("四点校准：请依次点击纸面的 4 个角点（顺序随意），Esc 取消")
-        self.canvas.start_pick_points()
+        page = self.doc.pages[self.current_page]
+        quad_px, detected = initial_quad(page.image)
+        dpi = page.dpi
+        pts_mm = [
+            (float(x) / dpi * MM_PER_INCH, float(y) / dpi * MM_PER_INCH) for x, y in quad_px
+        ]
+        self.canvas.start_quad_adjust(pts_mm)
+        source = "已自动检测到纸面四角" if detected else "未检测到纸边，先给了个默认框"
+        self.info_label.setText(
+            f"四点校准：{source}。拖动蓝色把手贴住纸的四个角，"
+            "拖空白处可平移、滚轮缩放，方向键微调 0.1mm，回车确认，Esc 取消。"
+        )
 
-    def _on_pick_cancelled(self) -> None:
+    def _on_quad_changed(self, pts_mm: list) -> None:
+        """拖动中实时提示长宽比：偏离 A 系纸的 √2 通常意味着角点没贴准。"""
+        if self.doc is None or self.current_page < 0:
+            return
+        dpi = self.doc.pages[self.current_page].dpi
+        quad_px = np.array(
+            [[x / MM_PER_INCH * dpi, y / MM_PER_INCH * dpi] for x, y in pts_mm],
+            dtype=np.float32,
+        )
+        ratio = quad_aspect(quad_px)
+        deviation = abs(ratio - ASPECT_A_SERIES) / ASPECT_A_SERIES
+        verdict = (
+            "接近 A 系纸"
+            if deviation <= ASPECT_TOLERANCE
+            else "偏离 A 系纸，检查角点是否贴准"
+        )
+        self.info_label.setText(
+            f"当前框选长宽比 {ratio:.3f}（A 系纸为 {ASPECT_A_SERIES:.3f}）——{verdict}。\n"
+            "回车确认，Esc 取消。"
+        )
+
+    def _on_quad_cancelled(self) -> None:
         self.info_label.setText("已取消四点校准")
 
-    def _on_points_picked(self, pts_mm: list) -> None:
+    def _on_quad_accepted(self, pts_mm: list) -> None:
         page = self.doc.pages[self.current_page]
         old_dpi = page.dpi
         # 场景 mm → 页面像素
@@ -1033,14 +1077,11 @@ class MainWindow(QMainWindow):
         if homography is None:
             QMessageBox.warning(
                 self, "四点无效",
-                "四个点围成的区域太小（可能点挤在一起或几乎共线），请重新点取纸面四角。",
+                "四个把手围成的区域太小（可能挤在一起或几乎共线），请拉开后再确认。",
             )
-            self.canvas.cancel_pick()
-            return
+            return  # 把手留在原处，用户接着调，不必从头再来
         if WarpPreviewDialog(self, trial.image).exec() != QDialog.Accepted:
-            self.canvas.cancel_pick()
-            self._on_page_changed(self.current_page)
-            return
+            return  # 同上：预览里觉得不对就继续拖，把手不撤
 
         with self._command("四点纸边校准"):
             # 已盖章坐标映射：旧 mm → 旧像素 →(H)→ 新像素 → 新 mm
@@ -1061,7 +1102,7 @@ class MainWindow(QMainWindow):
             page.image = trial.image
             page.phys_w_mm, page.phys_h_mm = trial.phys_w_mm, trial.phys_h_mm
             page.needs_calibration = False
-            self.canvas.cancel_pick()
+            self.canvas.cancel_quad_adjust()
             self._on_page_changed(self.current_page, resync=False)
             self._refresh_page_thumbnail(self.current_page)
         self.info_label.setText("四点校准完成：页面已拉伸为标准 A4（210×297mm）")

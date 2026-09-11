@@ -1,9 +1,16 @@
-"""四点纸边校准测试（修改意见）：用户点四顶点 → 透视拉伸为标准 A4。"""
+"""四点纸边校准测试：自动检测给初值 → 用户拖四角 → 透视拉伸为标准 A4。"""
 
 import cv2
 import numpy as np
 
-from core.autocal import map_points_through, warp_to_a4
+from core.autocal import (
+    initial_quad,
+    map_points_through,
+    quad_area_ratio,
+    quad_aspect,
+    quad_target_size,
+    warp_to_a4,
+)
 from core.document import A4_H_MM, A4_W_MM, Page
 
 
@@ -68,3 +75,102 @@ def test_quad_order_insensitive():
     H2 = warp_to_a4(page2, shuffled)
     assert H1 is not None and H2 is not None
     assert page1.image.shape == page2.image.shape
+
+
+# ── 初值：自动检测成功用检测结果，失败给默认框（用户永远不从零点起）──
+
+def test_initial_quad_uses_detection_when_paper_is_visible():
+    img, quad = _photo_with_margin()
+    got, detected = initial_quad(img)
+    assert detected is True
+    assert got.shape == (4, 2)
+    # 检测出的四角应贴近真实纸角（容差取图像长边的 3%）
+    tolerance = max(img.shape[:2]) * 0.03
+    expected = sorted(map(tuple, quad))
+    actual = sorted(map(tuple, got))
+    for (ex, ey), (ax, ay) in zip(expected, actual, strict=True):
+        assert abs(ax - ex) < tolerance and abs(ay - ey) < tolerance
+
+
+def _undetectable() -> np.ndarray:
+    """检测必然失败的图：暗底上散落几块小亮斑，没有一块够得上纸面。"""
+    img = np.full((2000, 1400, 3), 40, dtype=np.uint8)
+    for x, y in ((100, 150), (900, 400), (300, 1500), (1000, 1700)):
+        img[y : y + 220, x : x + 220] = 245
+    return img
+
+
+def test_full_bleed_scan_detects_whole_image():
+    """纸铺满画面的无边扫描件：整幅就是纸面，检测应当成功并返回全图。
+
+    这不是误报——此时把手落在图像四角、确认后近似恒等变换，正是想要的结果。
+    """
+    img = np.full((2000, 1400, 3), 252, dtype=np.uint8)
+    got, detected = initial_quad(img)
+    assert detected is True
+    h, w = img.shape[:2]
+    assert got[:, 0].max() > w * 0.9 and got[:, 1].max() > h * 0.9
+
+
+def test_initial_quad_falls_back_to_inset_box():
+    """检测失败时仍要给出一个可拖的框，绝不把用户丢回"从零点四下"。"""
+    img = _undetectable()
+    got, detected = initial_quad(img, inset_ratio=0.05)
+    assert detected is False
+    assert got.shape == (4, 2)
+    h, w = img.shape[:2]
+    xs, ys = got[:, 0], got[:, 1]
+    assert abs(xs.min() - w * 0.05) < 1.0
+    assert abs(xs.max() - (w - 1 - w * 0.05)) < 1.0
+    assert abs(ys.min() - h * 0.05) < 1.0
+    assert abs(ys.max() - (h - 1 - h * 0.05)) < 1.0
+
+
+def test_initial_quad_is_ordered_top_left_first():
+    """返回值必须是有序的，画布按顺序连线才不会连成交叉的蝴蝶形。"""
+    got, _ = initial_quad(_undetectable())
+    tl, tr, br, bl = got
+    assert tl[0] < tr[0] and bl[0] < br[0]     # 左列在右列左边
+    assert tl[1] < bl[1] and tr[1] < br[1]     # 上行在下行上面
+
+
+def test_initial_quad_always_inside_image():
+    img = _undetectable()
+    got, _ = initial_quad(img)
+    h, w = img.shape[:2]
+    assert got[:, 0].min() >= 0 and got[:, 0].max() <= w - 1
+    assert got[:, 1].min() >= 0 and got[:, 1].max() <= h - 1
+
+
+# ── 实时比例提示 ──
+
+def test_quad_aspect_reports_pre_warp_ratio():
+    """比例取拉正前的边长。取拉正后的恒等于 √2，拿来提示毫无意义。"""
+    square = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.float32)
+    assert abs(quad_aspect(square) - 1.0) < 1e-6
+    a4ish = np.array([[0, 0], [100, 0], [100, 141], [0, 141]], dtype=np.float32)
+    assert abs(quad_aspect(a4ish) - 1.41) < 0.01
+
+
+def test_quad_aspect_is_order_insensitive():
+    quad = np.array([[0, 0], [100, 0], [100, 141], [0, 141]], dtype=np.float32)
+    assert abs(quad_aspect(quad) - quad_aspect(quad[[2, 0, 3, 1]])) < 1e-6
+
+
+def test_quad_aspect_handles_degenerate_quad():
+    collinear = np.array([[0, 0], [10, 0], [20, 0], [30, 0]], dtype=np.float32)
+    assert quad_aspect(collinear) == 0.0
+
+
+def test_quad_target_size_respects_orientation():
+    portrait = np.array([[0, 0], [100, 0], [100, 300], [0, 300]], dtype=np.float32)
+    w, h, landscape = quad_target_size(portrait)
+    assert landscape is False and h > w
+    landscape_quad = np.array([[0, 0], [300, 0], [300, 100], [0, 100]], dtype=np.float32)
+    w2, h2, landscape2 = quad_target_size(landscape_quad)
+    assert landscape2 is True and w2 > h2
+
+
+def test_quad_area_ratio():
+    quad = np.array([[0, 0], [50, 0], [50, 50], [0, 50]], dtype=np.float32)
+    assert abs(quad_area_ratio(quad, (100, 100)) - 0.25) < 1e-3

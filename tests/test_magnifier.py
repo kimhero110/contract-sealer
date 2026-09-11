@@ -4,8 +4,6 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from app.main_window import MainWindow
@@ -59,18 +57,41 @@ def test_magnifier_crop_pads_at_edge(qapp):
     win.close()
 
 
-def test_magnifier_visibility_in_modes(qapp):
-    """拾取模式悬停显示放大镜；退出模式隐藏。"""
+def test_magnifier_follows_quad_handle(qapp):
+    """四点校准：拖动把手时放大镜贴着把手显示，退出模式后隐藏。"""
     win = _make_window(qapp)
-    win.canvas.start_pick_points()
-    target = win.canvas.mapFromScene(win.canvas.mapToScene(QPoint(200, 200)))
-    QTest.mouseMove(win.canvas.viewport(), target)
+    win.canvas.start_quad_adjust([(20.0, 20.0), (190.0, 20.0), (190.0, 277.0), (20.0, 277.0)])
+    qapp.processEvents()
+    handle = win.canvas._quad_handles[0]
+    handle.setPos(30.0, 35.0)          # 模拟拖动，itemChange 会驱动放大镜
     qapp.processEvents()
     assert win.canvas._magnifier.isVisible()
-    # 点满 4 点（拾取自动结束）
-    QTest.mouseClick(win.canvas.viewport(), Qt.LeftButton, Qt.NoModifier, target)
-    # 退出后隐藏
-    win.canvas.cancel_pick()
+    win.canvas.cancel_quad_adjust()
     qapp.processEvents()
     assert not win.canvas._magnifier.isVisible()
+    win.close()
+
+
+def test_quad_handles_seeded_and_clamped(qapp):
+    """把手按初值落位；拖出页面范围会被钳回纸内。"""
+    win = _make_window(qapp)
+    pts = [(20.0, 20.0), (190.0, 20.0), (190.0, 277.0), (20.0, 277.0)]
+    win.canvas.start_quad_adjust(pts)
+    assert win.canvas.adjusting_quad
+    assert [(round(x, 1), round(y, 1)) for x, y in win.canvas.quad_points()] == pts
+    win.canvas._quad_handles[0].setPos(-50.0, -50.0)
+    qapp.processEvents()
+    x, y = win.canvas.quad_points()[0]
+    assert x >= 0.0 and y >= 0.0
+    win.close()
+
+
+def test_quad_handle_nudge_uses_physical_step(qapp):
+    """方向键微调走物理毫米，与落章微调同一套步进。"""
+    win = _make_window(qapp)
+    win.canvas.start_quad_adjust([(20.0, 20.0), (190.0, 20.0), (190.0, 277.0), (20.0, 277.0)])
+    win.canvas._quad_handles[0].setSelected(True)
+    assert win.canvas._nudge_handle(0.1, 0.0)
+    x, _y = win.canvas.quad_points()[0]
+    assert abs(x - 20.1) < 1e-6
     win.close()
