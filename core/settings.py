@@ -1,6 +1,6 @@
 """应用设置：跨会话记住用户选择，存 settings.json。
 
-只存"下次还想要"的东西（输出目录、日期格式与字号），不存会话状态。
+只存"下次还想要"的东西（输出目录、日期格式与字号、导出编码），不存会话状态。
 读失败一律回退默认值——设置文件损坏不该让工具打不开。
 """
 
@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .export import ExportOptions
 from .paths import app_data_dir
 
 # 输出目录的特殊值：跟随源文件所在目录（默认行为）
@@ -27,6 +28,8 @@ class Settings:
     output_dir: str = OUTPUT_DIR_BESIDE_SOURCE   # 空 = 与源文件同目录
     date_format: str = "%Y年%m月%d日"
     date_height_mm: float = 4.5
+    export_format: str = "jpeg"   # jpeg（有损，小）/ png（无损，大）
+    jpeg_quality: int = 92        # 仅 jpeg 有效
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
@@ -47,6 +50,9 @@ class Settings:
             json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8"
         )
         return path
+
+    def export_options(self) -> ExportOptions:
+        return ExportOptions(self.export_format, self.jpeg_quality).normalized()
 
     def resolved_output_dir(self, source_path: Path | None) -> Path:
         """实际输出目录：设置了就用设置，否则跟随源文件，再否则当前目录。"""

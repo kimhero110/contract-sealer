@@ -85,7 +85,7 @@ def _rotate_rgba(rgba: np.ndarray, angle_deg: float) -> np.ndarray:
     from PIL import Image
 
     im = Image.fromarray(rgba, "RGBA")
-    return np.array(im.rotate(angle_deg, resample=Image.BICUBIC, expand=True))
+    return np.array(im.rotate(angle_deg, resample=Image.Resampling.BICUBIC, expand=True))
 
 
 def _multiply_composite(

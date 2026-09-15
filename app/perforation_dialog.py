@@ -113,7 +113,7 @@ class PerforationDialog(QDialog):
         self.diameter_spin.setSuffix(" mm")
         form.addRow("印章直径", self.diameter_spin)
 
-        self.jitter_slider = QSlider(Qt.Horizontal)
+        self.jitter_slider = QSlider(Qt.Orientation.Horizontal)
         self.jitter_slider.setRange(0, 100)
         self.jitter_slider.setValue(50)
         form.addRow("随机强度", self.jitter_slider)
@@ -123,13 +123,13 @@ class PerforationDialog(QDialog):
         self.warn_label.setWordWrap(True)
         form.addRow(self.warn_label)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.effect_btn = FitButton("页面效果预览…")
         self.effect_btn.clicked.connect(self._effect_preview)
         self.preview_btn = FitButton("拼合预览…")
         self.preview_btn.clicked.connect(self._preview)
-        btns.addButton(self.effect_btn, QDialogButtonBox.ActionRole)
-        btns.addButton(self.preview_btn, QDialogButtonBox.ActionRole)
+        btns.addButton(self.effect_btn, QDialogButtonBox.ButtonRole.ActionRole)
+        btns.addButton(self.preview_btn, QDialogButtonBox.ButtonRole.ActionRole)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
@@ -199,6 +199,7 @@ class PerforationDialog(QDialog):
             return
         ref_dpi = self._pages[self._page_indices()[0]].dpi
         img = assemble_preview(placements, ref_dpi)
+        assert self.spec is not None  # _plan() 成功即已赋值
         PreviewDialog(self, img, len(placements), self.spec.side).exec()
 
     def _effect_preview(self) -> None:
@@ -225,7 +226,7 @@ class PerforationDialog(QDialog):
             f"将在 {len(self.placements)} 页上放置骑缝章切片。\n"
             "建议先点「拼合预览」确认多页拼合能还原完整印文。\n\n确定应用吗？",
         )
-        if ret == QMessageBox.Yes:
+        if ret == QMessageBox.StandardButton.Yes:
             self.accept()
 
 
@@ -266,14 +267,14 @@ class EffectPreviewDialog(QDialog):
             pl = next(p for p in placements if p.page_index == page_idx)
             thumb = self._render_effect(pages[page_idx], pl)
             label = _ClickablePageLabel(f"第 {page_idx + 1} 页")
-            label.setAlignment(Qt.AlignCenter)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             pm = np_rgb_to_qpixmap(thumb)
             label.setPixmap(pm)
             label.position_clicked.connect(self._on_click)
             row.addWidget(label)
         layout.addLayout(row)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
         self.resize(1000, 560)
@@ -331,14 +332,14 @@ class PreviewDialog(QDialog):
         layout.addWidget(hint)
         pm = np_rgb_to_qpixmap(img)
         if pm.width() > 900:
-            pm = pm.scaledToWidth(900, Qt.SmoothTransformation)
+            pm = pm.scaledToWidth(900, Qt.TransformationMode.SmoothTransformation)
         label = QLabel()
         label.setPixmap(pm)
         scroll = QScrollArea()
         scroll.setWidget(label)
         scroll.setWidgetResizable(True)
         layout.addWidget(scroll)
-        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
         layout.addWidget(btns)

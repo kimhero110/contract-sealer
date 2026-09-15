@@ -3,7 +3,7 @@
 方案 v1.2 §4.5：算法从"红色分割"泛化为任意墨色提取。
 - 红章：HSV 红色区间分割，红色纯度 → alpha（保留印泥浓淡）；
 - 深色墨迹（签名）：相对纸面亮度的暗度/蓝色差分 → alpha；
-- 形态学去噪 + 连通域过滤去纸面噪点；
+- 连通域过滤去纸面噪点（阈值相对墨迹自身尺寸，小数字不会被当噪点）；
 - 结果裁剪到墨迹包围盒。
 """
 
@@ -38,20 +38,46 @@ def _load_rgb(image: str | Path | np.ndarray | Image.Image) -> np.ndarray:
         return _load_rgb(np.array(ImageOps.exif_transpose(im).convert("RGBA")))
 
 
-def _remove_noise(alpha: np.ndarray, min_component_ratio: float = 0.0005) -> np.ndarray:
-    """形态学去噪 + 连通域过滤：去掉孤立噪点，保留墨迹。"""
-    mask = (alpha > 0.15).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+# 噪点判定尺度：以墨迹自身的外接尺寸 D 为基准，边长 D×NOISE_SCALE 的方块以下算噪点。
+# 不能按整张图片面积算——12MP 手机照片里一枚 800px 的章，"整图 0.05%" 是 6000px，
+# 而印文里一个小数字只有一两百像素，全部被当噪点扔掉（"公章里偶发丢几个小数字"）。
+NOISE_SCALE = 0.005
+# 估计墨迹外接范围时只看"大块"：面积不到最大连通域 1% 的碎片不参与定界
+_EXTENT_MIN_RATIO = 0.01
+# 外接范围向外放宽的比例：范围之外的红/黑点是纸面污渍，不是印文
+_EXTENT_MARGIN = 0.15
 
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+def _remove_noise(alpha: np.ndarray, min_alpha: float = 0.15) -> np.ndarray:
+    """连通域过滤：去掉孤立噪点，保留墨迹——包括印文里最小的那个数字。
+
+    判定规则全部相对于墨迹自身：
+    - 先用大块连通域（≥ 最大块的 1%）估计墨迹外接范围 D（章≈直径，签名≈宽度）；
+    - 面积 ≥ (D×0.5%)² 且落在外接范围（外扩 15%）内的连通域保留，其余视为噪点。
+      800px 的章 → 阈值 16px；2000px 的章 → 100px；一个小数字有几百到上千像素，稳稳保住。
+
+    不再做 3×3 形态学开运算：开运算会把宽度 ≤2px 的笔画整条抹掉，
+    小尺寸素材里的数字和签名细笔画正是这么没的。单像素噪点由面积下限兜住。
+    """
+    mask = (alpha > min_alpha).astype(np.uint8)
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 1:
         return alpha * mask.astype(np.float32)
-    min_area = max(8, int(mask.size * min_component_ratio))
-    keep = np.zeros_like(mask)
-    for i in range(1, n):
-        if stats[i, cv2.CC_STAT_AREA] >= min_area:
-            keep[labels == i] = 1
+
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    big = np.nonzero(areas >= max(1, areas.max() * _EXTENT_MIN_RATIO))[0] + 1
+    x0 = int(stats[big, cv2.CC_STAT_LEFT].min())
+    y0 = int(stats[big, cv2.CC_STAT_TOP].min())
+    x1 = int((stats[big, cv2.CC_STAT_LEFT] + stats[big, cv2.CC_STAT_WIDTH]).max())
+    y1 = int((stats[big, cv2.CC_STAT_TOP] + stats[big, cv2.CC_STAT_HEIGHT]).max())
+    extent = max(x1 - x0, y1 - y0, 1)
+    margin = extent * _EXTENT_MARGIN
+    min_area = max(6, round((extent * NOISE_SCALE) ** 2))
+
+    cx, cy = centroids[1:, 0], centroids[1:, 1]
+    inside = (cx >= x0 - margin) & (cx <= x1 + margin) & (cy >= y0 - margin) & (cy <= y1 + margin)
+    keep_ids = np.nonzero((areas >= min_area) & inside)[0] + 1
+    keep = np.isin(labels, keep_ids)
     return alpha * keep.astype(np.float32)
 
 

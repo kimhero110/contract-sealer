@@ -106,10 +106,10 @@ def test_atomic_write_on_failure(seal_png, tmp_path, monkeypatch):
     page = _blank_a4_page()
     out = tmp_path / "out.pdf"
 
-    def boom(img):
+    def boom(img, options):
         raise RuntimeError("模拟导出中断")
 
-    monkeypatch.setattr(export_mod, "_to_jpeg_bytes", boom)
+    monkeypatch.setattr(export_mod, "_encode_page", boom)
     with pytest.raises(RuntimeError):
         export_pdf([page], [page.image], out, sealog={"seed": 1})
 
@@ -150,3 +150,38 @@ def test_export_on_real_scan(scan_jpg, seal_png, tmp_path):
     )
     diameter = measure_ink_diameter_mm(roi_page.image, roi_page)
     assert abs(diameter - 40.0) <= 1.5  # JPEG 有损，放宽到 1.5mm
+
+
+def test_export_png_is_lossless(tmp_path):
+    """PNG 导出：嵌入 PDF 的页面图像逐像素等于合成结果，sealog 记下编码方式。"""
+    import json
+
+    import pymupdf
+
+    from core.export import ExportOptions
+
+    page = _blank_a4_page()
+    img = page.image.copy()
+    img[100:300, 100:300] = (37, 91, 200)  # 一块不利于 JPEG 的纯色硬边
+    out = export_pdf(
+        [page], [img], tmp_path / "png.pdf", sealog={"seed": 1},
+        options=ExportOptions(image_format="png"),
+    )
+    with pymupdf.open(out) as doc:
+        xref = doc[0].get_images()[0][0]
+        info = doc.extract_image(xref)
+        assert info["ext"] == "png"
+        pix = pymupdf.Pixmap(info["image"])
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3]
+    assert np.array_equal(arr, img)
+    log = json.loads(out.with_suffix(".sealog").read_text(encoding="utf-8"))
+    assert log["export_options"] == {"image_format": "png", "jpeg_quality": 92}
+
+
+def test_export_options_validation():
+    from core.export import ExportOptions
+
+    assert ExportOptions("JPEG", 250).normalized().jpeg_quality == 100
+    assert ExportOptions("png", -3).normalized().jpeg_quality == 1
+    with pytest.raises(ValueError):
+        ExportOptions("webp").normalized()

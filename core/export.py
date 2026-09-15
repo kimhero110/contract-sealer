@@ -4,7 +4,9 @@
 - 压平默认强制：PDF 中每页就是一张合成后的整页图像，不存在可分离的印章对象；
 - 绝不覆盖任何已有文件：调用前由 make_output_path 保证目标路径唯一；
 - 原子写：先写同目录临时文件，完成后 os.replace；
-- 每次导出写同名 .sealog（JSON：种子、页范围、参数快照），P0 必备。
+- 每次导出写同名 .sealog（JSON：种子、页范围、参数快照），P0 必备；
+- 页面图像的编码由 ExportOptions 决定：默认 JPEG 质量 92（体积小、300DPI 下肉眼看不出），
+  需要无损时选 PNG——原件是文字页时 JPEG 会留下压缩痕迹，这是用户该有的选择。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import io
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +23,27 @@ import pymupdf
 from PIL import Image
 
 from .document import MM_PER_INCH, PT_PER_INCH, Page
+
+FORMAT_JPEG = "jpeg"
+FORMAT_PNG = "png"
+DEFAULT_JPEG_QUALITY = 92
+
+
+@dataclass(frozen=True)
+class ExportOptions:
+    """页面图像嵌入 PDF 时的编码方式。"""
+
+    image_format: str = FORMAT_JPEG  # jpeg（有损，小）/ png（无损，大）
+    jpeg_quality: int = DEFAULT_JPEG_QUALITY  # 仅 jpeg 有效，1–100
+
+    def normalized(self) -> ExportOptions:
+        fmt = self.image_format.lower()
+        if fmt not in (FORMAT_JPEG, FORMAT_PNG):
+            raise ValueError(f"不支持的导出图像格式: {self.image_format}（可选 jpeg / png）")
+        return ExportOptions(fmt, int(min(100, max(1, self.jpeg_quality))))
+
+    def to_dict(self) -> dict:
+        return {"image_format": self.image_format, "jpeg_quality": self.jpeg_quality}
 
 
 def make_output_path(source_path: Path | None, out_dir: Path, suffix: str = ".pdf") -> Path:
@@ -39,11 +63,13 @@ def export_pdf(
     images: list[np.ndarray],
     out_path: Path,
     sealog: dict,
+    options: ExportOptions | None = None,
 ) -> Path:
     """压平导出 PDF。images[i] 为 pages[i] 盖章后的 RGB 图像（尺寸可与原页不同）。
 
-    页面物理尺寸取自 pages[i]，保证打印尺寸正确。
+    页面物理尺寸取自 pages[i]，保证打印尺寸正确。编码方式见 ExportOptions。
     """
+    options = (options or ExportOptions()).normalized()
     if len(pages) != len(images):
         raise ValueError("pages 与 images 数量不一致")
     if not pages:
@@ -59,7 +85,7 @@ def export_pdf(
             w_pt = page.phys_w_mm / MM_PER_INCH * PT_PER_INCH
             h_pt = page.phys_h_mm / MM_PER_INCH * PT_PER_INCH
             pdf_page = doc.new_page(width=w_pt, height=h_pt)
-            pdf_page.insert_image(pdf_page.rect, stream=_to_jpeg_bytes(img))
+            pdf_page.insert_image(pdf_page.rect, stream=_encode_page(img, options))
         # 先写临时文件
         doc.save(tmp_path, deflate=True)
         doc.close()
@@ -74,7 +100,9 @@ def export_pdf(
                 pass
         raise
 
-    _write_sealog(out_path, sealog)
+    log = dict(sealog)
+    log.setdefault("export_options", options.to_dict())
+    _write_sealog(out_path, log)
     return out_path
 
 
@@ -118,9 +146,22 @@ def count_separable_ink_images(pdf_path: Path, page_coverage: float = 0.9) -> in
     return suspicious
 
 
-def _to_jpeg_bytes(img: np.ndarray, quality: int = 92) -> bytes:
+def _encode_page(img: np.ndarray, options: ExportOptions) -> bytes:
+    if options.image_format == FORMAT_PNG:
+        return _to_png_bytes(img)
+    return _to_jpeg_bytes(img, options.jpeg_quality)
+
+
+def _to_jpeg_bytes(img: np.ndarray, quality: int = DEFAULT_JPEG_QUALITY) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(img).save(buf, format="JPEG", quality=quality, subsampling=0)
+    return buf.getvalue()
+
+
+def _to_png_bytes(img: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    # 压缩级别 6：再高只换来几个百分点体积，导出时间却成倍增长
+    Image.fromarray(img).save(buf, format="PNG", compress_level=6)
     return buf.getvalue()
 
 

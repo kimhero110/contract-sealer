@@ -59,3 +59,60 @@ def test_strength_increases_coverage(seal_png):
     strong = extract_red_seal(seal_png, strength=2.0)
     # 强度越大 alpha 越高（裁剪尺寸可能不同，比较平均 alpha）
     assert strong[:, :, 3].astype(float).mean() >= weak[:, :, 3].astype(float).mean()
+
+
+# ── 回归：印文里的小数字不能被当噪点扔掉 ──
+
+
+def _seal_with_code(canvas_wh: tuple[int, int], seal_px: int, digit_px: int) -> np.ndarray:
+    """合成：大白纸中央一枚只有外环 + 底部 13 位小数字编号的红章。数字之间留空不粘连。"""
+    from PIL import Image, ImageDraw, ImageFont
+
+    w, h = canvas_wh
+    img = Image.new("RGB", (w, h), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    red = (200, 30, 30)
+    cx, cy, r = w // 2, h // 2, seal_px // 2
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=red, width=max(3, seal_px // 90))
+    font = ImageFont.load_default(size=digit_px)  # Pillow 自带矢量字体，跨平台一致
+    code = "1234567890123"
+    x = cx - d.textlength(code, font=font) * 1.4 / 2
+    for ch in code:
+        d.text((x, cy + r * 0.6), ch, font=font, fill=red)
+        x += d.textlength(ch, font=font) * 1.4
+    return np.array(img)
+
+
+def _component_count(mask: np.ndarray) -> int:
+    import cv2
+
+    n, _labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    return n - 1
+
+
+def test_small_digits_survive_in_large_photo():
+    """12MP 手机照片里一枚 800px 的章：13 个小数字（每个一两百像素）必须全部保留。
+
+    曾经的阈值按整图面积算（0.05% = 6000px），数字全军覆没——"公章里偶发丢几个小数字"。
+    """
+    arr = _seal_with_code((3000, 4000), 800, 40)
+    rgba = extract_red_seal(arr)
+    assert _component_count(rgba[:, :, 3] > 128) == 14  # 外环 + 13 个数字
+
+
+def test_small_digits_survive_at_low_resolution():
+    """小尺寸素材：14px 高的数字笔画只有 1–2px 宽，3×3 开运算会整条抹掉。"""
+    arr = _seal_with_code((400, 400), 300, 14)
+    rgba = extract_red_seal(arr)
+    assert _component_count(rgba[:, :, 3] > 128) >= 14
+
+
+def test_isolated_specks_far_from_seal_are_dropped():
+    """章外的红色污点仍然是噪点：不在墨迹外接范围内就丢，大小无关。"""
+    arr = _seal_with_code((2000, 2000), 600, 30)
+    arr[100:106, 100:106] = (200, 30, 30)  # 角落一个 6×6 红点
+    arr[1900:1903, 300:303] = (200, 30, 30)
+    rgba = extract_red_seal(arr)
+    # 裁剪后的结果尺寸应只包住印章（外接约 600px + 边距），而不是被角落污点撑到整图
+    assert max(rgba.shape[:2]) < 700
+    assert _component_count(rgba[:, :, 3] > 128) == 14

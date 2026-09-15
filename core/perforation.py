@@ -46,9 +46,9 @@ def detect_paper_edge_x_px(img: np.ndarray, side: str, search_ratio: float = 0.2
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     h, w = gray.shape
     band = gray[int(h * 0.2) : int(h * 0.8)]
-    profile = band.mean(axis=0).astype(np.float32)
+    raw_profile = band.mean(axis=0).astype(np.float32)
     # 平滑抑制噪点
-    profile = cv2.GaussianBlur(profile.reshape(1, -1), (1, 15), 0).ravel()
+    profile = cv2.GaussianBlur(raw_profile.reshape(1, -1), (1, 15), 0).ravel()
 
     # 纸内参考亮度：中央区域中位数
     paper_ref = float(np.median(band[:, w // 3 : 2 * w // 3]))

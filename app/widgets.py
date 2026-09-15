@@ -38,7 +38,7 @@ class VScrollArea(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     def minimumSizeHint(self) -> QSize:
         hint = super().minimumSizeHint()
@@ -83,5 +83,5 @@ class ElidedLabel(QLabel):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
-        text = self.fontMetrics().elidedText(self._full, Qt.ElideMiddle, self.width())
-        painter.drawText(self.rect(), int(self.alignment()) | int(Qt.AlignVCenter), text)
+        text = self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, self.width())
+        painter.drawText(self.rect(), int(self.alignment()) | int(Qt.AlignmentFlag.AlignVCenter), text)

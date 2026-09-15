@@ -60,6 +60,21 @@ def px_to_mm(px: float, dpi: float) -> float:
     return px / dpi * MM_PER_INCH
 
 
+@dataclass(frozen=True)
+class PageState:
+    """一页可撤销的全部状态：变异图像、图像版本、物理尺寸、待校准标志。
+
+    界面层的快照撤销通过 Page.state() / Page.restore() 存取它，
+    不再直接读写 Page 的私有字段——分层约定的口子由这个接口堵上。
+    """
+
+    override: np.ndarray | None
+    revision: int
+    phys_w_mm: float
+    phys_h_mm: float
+    needs_calibration: bool
+
+
 class Page:
     """一页。image 属性懒加载；写入后固定为变异结果。"""
 
@@ -128,6 +143,26 @@ class Page:
         tw = max(1, round(w * dpi / self.dpi))
         return cv2.resize(self.image, (tw, max(1, round(h * tw / w))), interpolation=cv2.INTER_AREA)
 
+    # ── 状态快照（撤销/重做用）──
+
+    def state(self) -> PageState:
+        """导出当前状态。像素数组按引用共享，不深拷——快照的是"哪一份图"，不是像素。"""
+        return PageState(
+            override=self._override,
+            revision=self.revision,
+            phys_w_mm=self.phys_w_mm,
+            phys_h_mm=self.phys_h_mm,
+            needs_calibration=self.needs_calibration,
+        )
+
+    def restore(self, state: PageState) -> None:
+        """写回一份快照。revision 一并回退，否则缩略图缓存会拿着旧版本号显示旧图。"""
+        self._override = state.override
+        self.revision = state.revision
+        self.phys_w_mm = state.phys_w_mm
+        self.phys_h_mm = state.phys_h_mm
+        self.needs_calibration = state.needs_calibration
+
     # ── 尺寸 ──
 
     @property
@@ -159,7 +194,7 @@ class Document:
     def __post_init__(self) -> None:
         self._cache: OrderedDict[int, np.ndarray] = OrderedDict()
         self._cache_limit = PAGE_CACHE_LIMIT
-        self._pdf = None  # 懒加载需要保持 PDF 句柄打开
+        self._pdf: pymupdf.Document | None = None  # 懒加载需要保持 PDF 句柄打开
         self._sources: list[Document] = []  # 追加导入的来源文档（保持其句柄存活）
         for page in self.pages:
             page._owner = self
@@ -348,7 +383,8 @@ def _exif_size(im: Image.Image) -> tuple[int, int]:
     """按 EXIF orientation 修正后的显示尺寸（手机拍照件方向自愈，只读头部不解码像素）。"""
     w, h = im.size
     try:
-        orientation = (im.getexif() or {}).get(274, 1)
+        exif = im.getexif()
+        orientation = int(exif.get(274, 1)) if exif else 1
     except Exception:
         orientation = 1
     if orientation in (5, 6, 7, 8):  # 需要旋转 90° 的方向 → 宽高互换

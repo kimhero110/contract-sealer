@@ -125,7 +125,7 @@ class SealPanel(QWidget):
     def _make_slider(self, lo: int, hi: int, val: int) -> QSlider:
         from PySide6.QtCore import Qt
 
-        s = QSlider(Qt.Horizontal)  # 显式水平——默认构造是竖向滑杆
+        s = QSlider(Qt.Orientation.Horizontal)  # 显式水平——默认构造是竖向滑杆
         s.setRange(lo, hi)
         s.setValue(val)
         return s
@@ -184,7 +184,7 @@ class SealPanel(QWidget):
         seal = self.current_seal()
         if seal is None:
             return
-        if QMessageBox.question(self, "确认", f"从库中删除「{seal.name}」？") == QMessageBox.Yes:
+        if QMessageBox.question(self, "确认", f"从库中删除「{seal.name}」？") == QMessageBox.StandardButton.Yes:
             from core.seal import _safe_slug
 
             for ext in (".png", ".json"):
@@ -210,7 +210,7 @@ class SealPanel(QWidget):
             return
 
         dlg = _ImportDialog(self, path.stem, kind)
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         name, kind, phys_mm = dlg.values()
         overwrite = False
@@ -222,12 +222,12 @@ class SealPanel(QWidget):
                 "印章库里已有同名文件",
                 f"「{name}」对应的文件已存在。\n\n"
                 f"是 = 覆盖旧的；否 = 存为「{unique_name(self.library_dir, name)}」；取消 = 不导入。",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
             )
-            if choice == QMessageBox.Cancel:
+            if choice == QMessageBox.StandardButton.Cancel:
                 return
-            if choice == QMessageBox.Yes:
+            if choice == QMessageBox.StandardButton.Yes:
                 overwrite = True
             else:
                 name = unique_name(self.library_dir, name)
@@ -268,7 +268,7 @@ class _ImportDialog(QDialog):
         hint.setStyleSheet("color: gray;")
         hint.setWordWrap(True)
         form.addRow(hint)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)

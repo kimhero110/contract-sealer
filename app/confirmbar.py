@@ -50,8 +50,8 @@ class ConfirmBar(QWidget):
         self.accept_btn = FitButton(accept_text)
         self.accept_btn.setObjectName("primary")
         for btn, sig in ((self.cancel_btn, self.cancelled), (self.accept_btn, self.accepted)):
-            btn.setFocusPolicy(Qt.NoFocus)  # 不抢画布焦点，点完还能方向键微调
-            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 不抢画布焦点，点完还能方向键微调
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(sig)
             lay.addWidget(btn)
 

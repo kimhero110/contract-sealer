@@ -39,7 +39,7 @@ def load_qr_pixmap(width: int) -> QPixmap | None:
     pm = QPixmap(str(path))
     if pm.isNull():
         return None
-    return pm.scaledToWidth(width, Qt.SmoothTransformation)
+    return pm.scaledToWidth(width, Qt.TransformationMode.SmoothTransformation)
 
 
 class AboutDialog(QDialog):
@@ -69,10 +69,10 @@ class AboutDialog(QDialog):
         if qr is not None:
             img_label = QLabel()
             img_label.setPixmap(qr)
-            img_label.setAlignment(Qt.AlignCenter)
+            img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(img_label)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         btns.accepted.connect(self.accept)
         layout.addWidget(btns)
 
@@ -89,12 +89,12 @@ class WarpPreviewDialog(QDialog):
         layout.addWidget(hint)
         pm = np_rgb_to_qpixmap(warped_img)
         if pm.height() > 640:
-            pm = pm.scaledToHeight(640, Qt.SmoothTransformation)
+            pm = pm.scaledToHeight(640, Qt.TransformationMode.SmoothTransformation)
         label = QLabel()
         label.setPixmap(pm)
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -123,7 +123,7 @@ class CalibrateDialog(QDialog):
         self.all_check = QCheckBox("应用到所有页面")
         self.all_check.setChecked(True)
         form.addRow(self.all_check)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -172,7 +172,7 @@ class DateStampDialog(QDialog):
         form.addRow("字高", self.height_spin)
 
         self.preview = QLabel()
-        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(60)
         form.addRow("预览", self.preview)
 
@@ -181,7 +181,7 @@ class DateStampDialog(QDialog):
         self.warn.setStyleSheet("color: #C0392B;")
         form.addRow("", self.warn)
 
-        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         form.addRow(self.buttons)
@@ -222,8 +222,54 @@ class DateStampDialog(QDialog):
         except ValueError as e:
             self.preview.clear()
             self.warn.setText(str(e))
-            self.buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
             return
         self.warn.setText("")
-        self.buttons.button(QDialogButtonBox.Ok).setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
         self.preview.setPixmap(np_rgba_to_qpixmap(ink))
+
+
+class ExportOptionsDialog(QDialog):
+    """导出编码设置：JPEG 质量 / 无损 PNG。
+
+    默认 JPEG 92：300DPI 下肉眼看不出，体积小。原件是文字页、或要交给 OCR 时，
+    JPEG 的压缩痕迹会咬字边——那就选 PNG，代价是文件大好几倍。
+    """
+
+    def __init__(self, parent, options):
+        from PySide6.QtWidgets import QRadioButton, QSpinBox
+
+        from core.export import FORMAT_PNG
+
+        super().__init__(parent)
+        self.setWindowTitle("导出设置")
+        layout = QVBoxLayout(self)
+        self.jpeg_radio = QRadioButton("JPEG（有损，文件小；默认）")
+        self.png_radio = QRadioButton("PNG（无损，文件大；文字页/需要 OCR 时选它）")
+        layout.addWidget(self.jpeg_radio)
+        form = QFormLayout()
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(1, 100)
+        self.quality_spin.setValue(options.jpeg_quality)
+        form.addRow("JPEG 质量（1–100）", self.quality_spin)
+        layout.addLayout(form)
+        layout.addWidget(self.png_radio)
+        if options.image_format == FORMAT_PNG:
+            self.png_radio.setChecked(True)
+        else:
+            self.jpeg_radio.setChecked(True)
+        self.jpeg_radio.toggled.connect(self.quality_spin.setEnabled)
+        self.quality_spin.setEnabled(self.jpeg_radio.isChecked())
+        note = QLabel("无论哪种编码，导出件都是整页位图：原件里可选中的文字不再是文字。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def values(self):
+        from core.export import FORMAT_JPEG, FORMAT_PNG, ExportOptions
+
+        fmt = FORMAT_PNG if self.png_radio.isChecked() else FORMAT_JPEG
+        return ExportOptions(fmt, self.quality_spin.value()).normalized()

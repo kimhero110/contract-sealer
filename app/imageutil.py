@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import cv2
 import numpy as np
+
+from core.session import natural_key  # 排序规则归 core（命令行也要用）；这里只是老导入路径
+
+__all__ = ["DISPLAY_MAX_LONG_SIDE", "display_image", "natural_key", "thumbnail"]
 
 # 屏显上限：~150DPI 的 A4 长边。全尺寸纹理只在深放大时才需要，翻页时纯浪费。
 DISPLAY_MAX_LONG_SIDE = 1754
@@ -25,8 +26,3 @@ def display_image(img: np.ndarray, max_long_side: int = DISPLAY_MAX_LONG_SIDE) -
 def thumbnail(img: np.ndarray, width: int) -> np.ndarray:
     h, w = img.shape[:2]
     return cv2.resize(img, (width, max(1, round(h * width / w))), interpolation=cv2.INTER_AREA)
-
-
-def natural_key(path: str):
-    """自然排序：第 2 页排在第 10 页前面（多图合成文档的页序）。"""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", Path(path).name)]

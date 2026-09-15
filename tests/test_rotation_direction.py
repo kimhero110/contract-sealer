@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
-pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
+pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # 没装 Qt / 缺 libEGL 的机器上只跑 core 层
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QGraphicsScene
 

@@ -46,10 +46,22 @@ python -m venv .venv
 
 .venv\Scripts\python.exe -m pytest tests -q   # 全绿才算完
 .venv\Scripts\ruff check .                    # 同样要全绿
+.venv\Scripts\mypy                            # 类型检查，CI 也跑
 ```
 
+月底 30 份合同不想一份份点？先在界面里把章导好、模板存好，然后交给命令行：
+
+```bat
+.venv\Scripts\python.exe -m core.cli list                                   # 看看有哪些章和模板
+.venv\Scripts\python.exe -m core.cli batch --template 末页落款 --out D:\out ^
+    --perforation 公章 合同1.pdf 合同2.pdf 合同3.pdf                        # 套模板 + 骑缝章，逐份导出
+```
+
+导出默认 JPEG 质量 92（300DPI 下肉眼看不出）；原件是文字页或还要过 OCR，
+在「文件 → 导出设置」里换成无损 PNG（命令行 `--png`），代价是文件大好几倍。
+
 架构一句话：UI 层（`app/`）只说"毫米"，core 层（`core/`）干所有像素换算的脏活累活，
-全部算法可脱离 GUI 测试。没装 PySide6 的机器（比如纯 Linux CI）上 GUI 用例自动 skip，
+全部算法可脱离 GUI 测试；会话与导出/批量也在 core，命令行和界面共用同一份。没装 PySide6 的机器（比如纯 Linux CI）上 GUI 用例自动 skip，
 core 层测试照跑——CI 里单独有一个"无 Qt"job 就是为了守住这条分层。
 
 真正难的地方不在"把图贴到 PDF 上"，在于一些看上去已经做对、实际上错了的地方：

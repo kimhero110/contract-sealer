@@ -138,7 +138,7 @@ def render_date_ink(
     # 1) 大号渲染到白底，取灰度作为墨量
     pad = _BASE_PX // 2
     box = font.getbbox(text)
-    canvas = Image.new("L", (box[2] - box[0] + 2 * pad, box[3] - box[1] + 2 * pad), 255)
+    canvas = Image.new("L", (int(box[2] - box[0] + 2 * pad), int(box[3] - box[1] + 2 * pad)), 255)
     ImageDraw.Draw(canvas).text((pad - box[0], pad - box[1]), text, font=font, fill=0)
     alpha = 255 - np.array(canvas)
 
@@ -151,7 +151,7 @@ def render_date_ink(
     # 3) 缩放到目标物理高度（墨迹高度即用户填的 height_mm）
     target_h = max(1, round(mm_to_px(height_mm, dpi)))
     target_w = max(1, round(alpha.shape[1] * target_h / alpha.shape[0]))
-    alpha_img = Image.fromarray(alpha).resize((target_w, target_h), Image.LANCZOS)
+    alpha_img = Image.fromarray(alpha).resize((target_w, target_h), Image.Resampling.LANCZOS)
 
     rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
     rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2] = color

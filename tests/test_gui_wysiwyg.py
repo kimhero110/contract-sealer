@@ -10,7 +10,7 @@
 import numpy as np
 import pytest
 
-pytest.importorskip("PySide6.QtWidgets")  # 没装 Qt 的机器上只跑 core 层
+pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # 没装 Qt / 缺 libEGL 的机器上只跑 core 层
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
@@ -193,4 +193,19 @@ def test_reroll_changes_normal_keeps_locked(qapp):
     assert normal.applied != before_applied
     assert not np.array_equal(normal.processed, before_normal)
     assert np.array_equal(locked.processed, before_locked)
+    win.close()
+
+
+def test_follow_mode_never_shows_magnifier(qapp):
+    """盖章跟随鼠标时只有十字准星，不弹放大镜（放大镜只属于四点校准）。"""
+    win = _make_window(qapp, pages=("1.jpg",))
+    win._add_stamp(_seal())
+    assert win.canvas.following
+    for x_mm, y_mm in ((60.0, 80.0), (100.0, 200.0), (150.0, 250.0)):
+        QTest.mouseMove(win.canvas.viewport(), _view_pos(win.canvas, x_mm, y_mm))
+        qapp.processEvents()
+        assert not win.canvas._magnifier.isVisible()
+    # 十字光标仍在：用户知道自己正在选位置
+    assert win.canvas.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    win.canvas.cancel_follow()
     win.close()

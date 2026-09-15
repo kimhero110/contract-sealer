@@ -22,6 +22,8 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
+      - name: 类型检查（mypy，core + app）
+        run: mypy
 
   test-core:
     name: 核心算法测试（Linux，无 Qt）
@@ -66,7 +68,7 @@ jobs:
 
   build:
     name: 打包 Windows exe
-    needs: [lint, test]
+    needs: [lint, test-core, test]
     if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:

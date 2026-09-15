@@ -1,4 +1,4 @@
-"""跟随鼠标的局部放大镜：四点校准 / 跟随落章等精确点选场景用。"""
+"""跟随把手的局部放大镜：四点校准对准纸角用。跟随落章不用它（章上有十字准星就够）。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class Magnifier(QWidget):
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         # 背景 + 取景画面
         p.fillRect(self.rect(), QColor(245, 246, 247))
         if self._pixmap is not None:

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import (
@@ -33,14 +35,14 @@ from PySide6.QtWidgets import (
 def np_rgb_to_qpixmap(img: np.ndarray) -> QPixmap:
     h, w = img.shape[:2]
     data = np.ascontiguousarray(img)
-    qimg = QImage(data.data, w, h, w * 3, QImage.Format_RGB888)
+    qimg = QImage(data.data, w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg.copy())
 
 
 def np_rgba_to_qpixmap(img: np.ndarray) -> QPixmap:
     h, w = img.shape[:2]
     data = np.ascontiguousarray(img)
-    qimg = QImage(data.data, w, h, w * 4, QImage.Format_RGBA8888)
+    qimg = QImage(data.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
     return QPixmap.fromImage(qimg.copy())
 
 
@@ -63,7 +65,7 @@ class StampItem(QGraphicsPixmapItem):
         self.setTransformOriginPoint(self._origin)
         self.set_center(center_x_mm, center_y_mm)
         self.setFlags(
-            QGraphicsPixmapItem.ItemIsMovable | QGraphicsPixmapItem.ItemIsSelectable
+            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable | QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable
         )
 
     def _update_scale(self) -> None:
@@ -90,22 +92,22 @@ class StampItem(QGraphicsPixmapItem):
     def paint(self, painter: QPainter, option, widget=None) -> None:
         # 三步序列（顺序不可调换）：
         # 1) multiply 绘制章体——印泥压进纸面，与导出 _multiply_composite 同语义
-        painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
         painter.drawPixmap(0, 0, self.pixmap())
         # 2) 立即恢复 SourceOver，避免污染后续绘制
-        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         r = self.boundingRect()
         cx, cy = r.center().x(), r.center().y()
         # 3) 中心点十字准星（亮红，1px cosmetic）
         arm = min(r.width(), r.height()) * 0.15
-        pen = QPen(Qt.red, 0)
+        pen = QPen(Qt.GlobalColor.red, 0)
         pen.setCosmetic(True)
         painter.setPen(pen)
-        painter.drawLine(cx - arm, cy, cx + arm, cy)
-        painter.drawLine(cx, cy - arm, cx, cy + arm)
+        painter.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+        painter.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
         # 选中框（手动画，避免 super().paint() 把它也 multiply 掉）
         if self.isSelected():
-            dash = QPen(QColor(0, 120, 255), 0, Qt.DashLine)
+            dash = QPen(QColor(0, 120, 255), 0, Qt.PenStyle.DashLine)
             dash.setCosmetic(True)
             painter.setPen(dash)
             painter.drawRect(r)
@@ -124,14 +126,14 @@ class QuadHandle(QGraphicsEllipseItem):
     def __init__(self, index: int, x_mm: float, y_mm: float, px_per_mm: float):
         super().__init__()
         self.index = index
-        self._notify = None  # 由画布注入：位置变化回调
+        self._notify: Callable[[QuadHandle], None] | None = None  # 由画布注入：位置变化回调
         self.setFlags(
-            QGraphicsItem.ItemIsMovable
-            | QGraphicsItem.ItemIsSelectable
-            | QGraphicsItem.ItemSendsGeometryChanges  # itemChange 才会收到位置变化
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+            | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            | QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges  # itemChange 才会收到位置变化
         )
         self.setBrush(QBrush(QColor(0, 120, 255, 170)))
-        self.setPen(QPen(Qt.white, 0))
+        self.setPen(QPen(Qt.GlobalColor.white, 0))
         self.setZValue(30)
         self.setToolTip(f"{self.LABELS[index]}角：拖动调整，方向键微调 0.1mm（Shift 1mm）")
         self.set_screen_scale(px_per_mm)
@@ -140,7 +142,7 @@ class QuadHandle(QGraphicsEllipseItem):
     def set_screen_scale(self, px_per_mm: float) -> None:
         r = self.RADIUS_PX / max(px_per_mm, 1e-6)
         self.setRect(-r, -r, 2 * r, 2 * r)
-        pen = QPen(Qt.white, 2.0 / max(px_per_mm, 1e-6))
+        pen = QPen(Qt.GlobalColor.white, 2.0 / max(px_per_mm, 1e-6))
         self.setPen(pen)
 
     def point(self) -> tuple[float, float]:
@@ -149,14 +151,14 @@ class QuadHandle(QGraphicsEllipseItem):
     def itemChange(self, change, value):
         # 钳在页面范围内用 ItemPositionChange（移动**之前**改写目标位置），
         # 而不是移动之后再 setPos 拉回来——后者会让 itemChange 递归自触发。
-        if change == QGraphicsItem.ItemPositionChange and self.scene() is not None:
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() is not None:
             rect = self.scene().sceneRect()
             if rect.isValid():
                 return QPointF(
                     min(max(value.x(), rect.left()), rect.right()),
                     min(max(value.y(), rect.top()), rect.bottom()),
                 )
-        elif change == QGraphicsItem.ItemPositionHasChanged and self._notify:
+        elif change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self._notify:
             self._notify(self)
         return super().itemChange(change, value)
 
@@ -165,7 +167,7 @@ class PageCanvas(QGraphicsView):
     """页面视图：滚轮缩放、印章拖动、方向键 0.1mm 微调（Shift=1mm）。
 
     额外交互模式：
-    - 跟随落章：印章跟随鼠标，单击落位，Esc 取消；
+    - 跟随落章：印章跟随鼠标（章上的十字准星即落点），单击落位，Esc 取消；
     - 单击移位：空白处单击（位移 <5px，区别于拖拽平移）把选中章移过去；
     - 四点校准：四个可拖把手 + 实时四边形，画布底部确认条或回车确认，Esc 取消。
 
@@ -193,7 +195,7 @@ class PageCanvas(QGraphicsView):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setRenderHints(self.renderHints())
         self._page_item: QGraphicsPixmapItem | None = None
         self._press_view_pos = None
@@ -208,7 +210,9 @@ class PageCanvas(QGraphicsView):
         from app.confirmbar import ConfirmBar
         from app.magnifier import Magnifier
 
-        # 放大镜（精确点选辅助）：取景回调由主窗口注入
+        # 放大镜只服务四点校准（要对准纸角，六倍取景才看得清）：取景回调由主窗口注入。
+        # 跟随落章不用它——章本身就有十字准星，章的位置本来也只需要毫米级精度，
+        # 六倍放大镜跟着鼠标跑反而遮住落点周围的版面，用户反映"盖章时不要出现放大镜"。
         self.magnifier_source = None  # (x_mm, y_mm) -> QPixmap
         self._magnifier = Magnifier(self.viewport())
         # 四点校准的鼠标出口：不是所有人都知道要按回车，焦点也未必在画布上
@@ -254,7 +258,7 @@ class PageCanvas(QGraphicsView):
 
     def fit_page(self) -> None:
         if self._scene.sceneRect().isValid():
-            self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+            self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
             self._rescale_quad_handles()
 
     # ── 印章管理 ──
@@ -288,22 +292,21 @@ class PageCanvas(QGraphicsView):
         self._reset_press_state()
         self._follow_item = StampItem(rgba, size_mm, 0, 0)
         self._follow_item.setOpacity(0.7)  # 跟随中半透明示意
-        self._follow_item.setFlag(QGraphicsPixmapItem.ItemIsMovable, False)
-        self._follow_item.setFlag(QGraphicsPixmapItem.ItemIsSelectable, False)
+        self._follow_item.setFlag(QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable, False)
+        self._follow_item.setFlag(QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable, False)
         self._follow_item.setZValue(10)
         self._scene.addItem(self._follow_item)
-        self.setDragMode(QGraphicsView.NoDrag)  # 跟随期间禁用平移，避免误拖
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)  # 跟随期间禁用平移，避免误拖
         self.setMouseTracking(True)
-        self.viewport().setCursor(Qt.CrossCursor)  # 十字光标：明确"正在选位置"
+        self.viewport().setCursor(Qt.CursorShape.CrossCursor)  # 十字光标：明确"正在选位置"
 
     def cancel_follow(self) -> None:
         if self._follow_item is not None:
             self._scene.removeItem(self._follow_item)
             self._follow_item = None
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             self.setMouseTracking(False)
             self.viewport().unsetCursor()
-            self._magnifier.hide()
         self._reset_press_state()
 
     @property
@@ -334,14 +337,14 @@ class PageCanvas(QGraphicsView):
             self._scene.addItem(handle)
             self._quad_handles.append(handle)
         self._quad_outline = QGraphicsPolygonItem()
-        self._quad_outline.setPen(QPen(QColor(0, 120, 255), 0, Qt.DashLine))
+        self._quad_outline.setPen(QPen(QColor(0, 120, 255), 0, Qt.PenStyle.DashLine))
         self._quad_outline.setBrush(QBrush(QColor(0, 120, 255, 28)))
         self._quad_outline.setZValue(29)
         self._scene.addItem(self._quad_outline)
         self._refresh_quad_outline()
         # 保持 ScrollHandDrag：拖把手=调整，拖空白=平移。
         # 旧流程在这里设 NoDrag，于是能缩放却不能平移，是最劝退的一环。
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setMouseTracking(True)
         if self._quad_handles:
             self._quad_handles[0].setSelected(True)
@@ -455,29 +458,17 @@ class PageCanvas(QGraphicsView):
             super().mousePressEvent(event)
             return
         # 先记录候选章，再调 super()——super 在空白处按下时会清空选中（Bug 1 修复）
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             hit = self.itemAt(event.position().toPoint())
             self._press_stamp = hit if isinstance(hit, StampItem) else self.selected_stamp()
             self._press_view_pos = event.position().toPoint()
         super().mousePressEvent(event)
 
-    def _update_magnifier(self, scene_pos, global_pos) -> None:
-        """跟随落章时驱动放大镜。四点校准的放大镜由把手移动回调驱动。"""
-        active = self._follow_item is not None
-        if active and self.magnifier_source is not None:
-            pm = self.magnifier_source(scene_pos.x(), scene_pos.y())
-            if pm is not None:
-                self._magnifier.set_crop(pm)
-                self._magnifier.follow_cursor(global_pos)
-                self._magnifier.show()
-                return
-        self._magnifier.hide()
-
     def mouseMoveEvent(self, event) -> None:
         if self._follow_item is not None:
+            # 跟随落章：章跟着鼠标走，十字准星就是落点，不开放大镜
             pos = self.mapToScene(event.position().toPoint())
             self._follow_item.set_center(pos.x(), pos.y())
-            self._update_magnifier(pos, event.globalPosition().toPoint())
             return
         if self._quad_mode:
             super().mouseMoveEvent(event)  # 把手拖动 / 空白处平移
@@ -490,7 +481,7 @@ class PageCanvas(QGraphicsView):
             super().mouseReleaseEvent(event)
             self._magnifier.hide()  # 松开才定稿，放大镜随即收起
             return
-        if self._follow_item is not None and event.button() == Qt.LeftButton:
+        if self._follow_item is not None and event.button() == Qt.MouseButton.LeftButton:
             pos = self.mapToScene(event.position().toPoint())
             # 页面外护栏：完全点在页面矩形外时忽略，防止盖出"隐形章"
             rect = self._scene.sceneRect()
@@ -506,7 +497,7 @@ class PageCanvas(QGraphicsView):
         # 单击（位移小于阈值）且未点在章上 → 移动候选章
         if (
             self._press_view_pos is not None
-            and event.button() == Qt.LeftButton
+            and event.button() == Qt.MouseButton.LeftButton
             and (event.position().toPoint() - self._press_view_pos).manhattanLength()
             < self.CLICK_THRESHOLD_PX
         ):
@@ -524,7 +515,7 @@ class PageCanvas(QGraphicsView):
             self.stamp_moved.emit(stamp)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() == Qt.Key_Escape:
+        if event.key() == Qt.Key.Key_Escape:
             if self.following:
                 self.cancel_follow()
                 self.follow_cancelled.emit()
@@ -532,20 +523,21 @@ class PageCanvas(QGraphicsView):
             if self._quad_mode:
                 self.cancel_quad_from_user()
                 return
-        step = 1.0 if event.modifiers() & Qt.ShiftModifier else 0.1
+        step = 1.0 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier else 0.1
         if self._quad_mode:
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.accept_quad_adjust()
                 return
             nudges = {
-                Qt.Key_Left: (-step, 0.0),
-                Qt.Key_Right: (step, 0.0),
-                Qt.Key_Up: (0.0, -step),
-                Qt.Key_Down: (0.0, step),
+                Qt.Key.Key_Left: (-step, 0.0),
+                Qt.Key.Key_Right: (step, 0.0),
+                Qt.Key.Key_Up: (0.0, -step),
+                Qt.Key.Key_Down: (0.0, step),
             }
-            if event.key() in nudges and self._nudge_handle(*nudges[event.key()]):
+            key = Qt.Key(event.key())
+            if key in nudges and self._nudge_handle(*nudges[key]):
                 return
-            if event.key() == Qt.Key_Tab:  # 在四个角之间轮转，纯键盘也能走完
+            if event.key() == Qt.Key.Key_Tab:  # 在四个角之间轮转，纯键盘也能走完
                 handles = self._quad_handles
                 current = self.selected_handle()
                 nxt = handles[(handles.index(current) + 1) % len(handles)] if current else handles[0]
@@ -555,19 +547,20 @@ class PageCanvas(QGraphicsView):
             super().keyPressEvent(event)
             return
         moves = {
-            Qt.Key_Left: (-step, 0),
-            Qt.Key_Right: (step, 0),
-            Qt.Key_Up: (0, -step),
-            Qt.Key_Down: (0, step),
+            Qt.Key.Key_Left: (-step, 0),
+            Qt.Key.Key_Right: (step, 0),
+            Qt.Key.Key_Up: (0, -step),
+            Qt.Key.Key_Down: (0, step),
         }
         stamp = self.selected_stamp()
-        if stamp and event.key() in moves:
-            dx, dy = moves[event.key()]
+        key = Qt.Key(event.key())
+        if stamp and key in moves:
+            dx, dy = moves[key]
             cx, cy = stamp.center()
             stamp.set_center(cx + dx, cy + dy)
             self.stamp_moved.emit(stamp)
             return
-        if stamp and event.key() == Qt.Key_Delete:
+        if stamp and event.key() == Qt.Key.Key_Delete:
             self.remove_selected_stamp()
             return
         super().keyPressEvent(event)

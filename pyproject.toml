@@ -1,6 +1,6 @@
 [project]
 name = "contract-sealer"
-version = "0.5.1"  # 与 core/__init__.py 的 __version__ 保持一致（test_project_meta 会验）
+version = "0.6.0"  # 与 core/__init__.py 的 __version__ 保持一致（test_project_meta 会验）
 description = "扫描合同盖章工具：物理尺寸 1:1 盖章、骑缝章、手写签名、日期戳，本地离线运行"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
@@ -13,11 +13,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.2", "ruff>=0.6", "mypy>=1.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.mypy]
+# 注解不是文档，是契约：CI 里跑 mypy，改坏签名会在合并前暴露。
+python_version = "3.12"
+files = ["core", "app"]
+ignore_missing_imports = true   # cv2 / pymupdf 没有完整存根
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
 
 [tool.ruff]
 line-length = 100

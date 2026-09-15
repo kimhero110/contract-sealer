@@ -100,7 +100,7 @@ class Randomizer:
 def _rotate(rgba: np.ndarray, angle_deg: float) -> np.ndarray:
     """绕中心旋转，画布扩大防裁切。逆时针为正。"""
     im = Image.fromarray(rgba, "RGBA")
-    rotated = im.rotate(angle_deg, resample=Image.BICUBIC, expand=True)
+    rotated = im.rotate(angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
     return np.array(rotated)
 
 
